@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=./harness-lib.sh
+source "$SCRIPT_DIR/harness-lib.sh"
+
+cleanup_prepare() {
+  local exit_code="$?"
+  local current_status=""
+  if [[ "$exit_code" -eq 0 || -z "${task_id:-}" ]]; then
+    return 0
+  fi
+
+  current_status=$(harness_task_field "$task_id" '.status // ""' 2>/dev/null || true)
+  if [[ "$current_status" == "preparing" ]]; then
+    harness_update_task_status "$task_id" "prepare_failed" "prepare script aborted unexpectedly" "${pr_url:-}"
+  fi
+}
+
+trap cleanup_prepare EXIT
+
+issue_number=""
+task_id=""
+use_next=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --issue)
+      issue_number="${2:-}"
+      shift 2
+      ;;
+    --task-id)
+      task_id="${2:-}"
+      shift 2
+      ;;
+    --next)
+      use_next=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+usage: scripts/task-prepare [--issue <n> | --task-id <id> | --next]
+EOF
+      exit 0
+      ;;
+    *)
+      harness_die "unknown argument: $1"
+      ;;
+  esac
+done
+
+harness_load_project_env
+harness_prepare_state
+
+if [[ "$use_next" -eq 1 ]]; then
+  next_task=$(harness_find_next_task_by_status "reviewed" || true)
+  [[ -n "$next_task" ]] || harness_die "no reviewed task found"
+  task_id=$(printf '%s' "$next_task" | jq -r '.task_id')
+fi
+
+task_id=$(harness_resolve_task_id "$issue_number" "$task_id")
+harness_task_exists "$task_id" || harness_die "task not found: $task_id"
+
+status=$(harness_task_field "$task_id" '.status // ""')
+if [[ "$status" == "reviewed" ]]; then
+  harness_transition_task_status "$task_id" "reviewed" "preparing" "prepare in progress" || harness_die "task $task_id was claimed by another prepare worker"
+elif [[ "$status" != "preparing" && "$status" != "prepared" ]]; then
+  harness_die "task $task_id is not reviewed/preparing/prepared (status=$status)"
+fi
+
+task_json=$(harness_task_json "$task_id")
+pr_url=$(printf '%s' "$task_json" | jq -r '.pr_url // ""')
+worktree=$(printf '%s' "$task_json" | jq -r '.worktree')
+issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // empty')
+repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
+
+[[ -n "$pr_url" ]] || harness_die "task $task_id has no pr_url"
+
+review_dir=$(harness_artifact_dir "reviews" "$task_id")
+review_json="$review_dir/review.json"
+[[ -f "$review_json" ]] || harness_die "missing review artifact: $review_json"
+
+review_verdict=$(jq -r '.verdict' "$review_json")
+reviewed_head_sha=$(jq -r '.reviewed_head_sha' "$review_json")
+[[ "$review_verdict" == "approved" ]] || harness_die "review is not approved for $task_id"
+
+pr_json=$(harness_fetch_pr_json "$pr_url")
+current_head_sha=$(printf '%s' "$pr_json" | jq -r '.headRefOid')
+pr_number=$(printf '%s' "$pr_json" | jq -r '.number')
+
+if [[ "$reviewed_head_sha" != "$current_head_sha" ]]; then
+  harness_update_task_status "$task_id" "pr_open" "review stale; PR head moved after review" "$pr_url"
+  if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+    harness_issue_comment "$repo_slug" "$issue_number" "Harness note: review artifact is stale because PR #$pr_number moved after review."
+  fi
+  printf 'prepare reset to pr_open: %s\n' "$task_id"
+  exit 0
+fi
+
+artifact_dir=$(harness_artifact_dir "prep" "$task_id")
+harness_ensure_artifact_dir "prep" "$task_id"
+printf '%s\n' "$pr_json" >"$artifact_dir/pr.json"
+printf '%s\n' "$task_json" >"$artifact_dir/task.json"
+
+docs_only=false
+if harness_issue_files_docs_only_from_pr_json "$pr_json"; then
+  docs_only=true
+fi
+
+commands=()
+if [[ "$docs_only" == "false" ]]; then
+  [[ -f "$HARNESS_PREPARE_COMMANDS_FILE" ]] || harness_die "missing prepare commands file: $HARNESS_PREPARE_COMMANDS_FILE"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] || continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    commands+=("$line")
+  done <"$HARNESS_PREPARE_COMMANDS_FILE"
+fi
+
+commands_json='[]'
+if [[ "${#commands[@]}" -gt 0 ]]; then
+  commands_json=$(printf '%s\n' "${commands[@]}" | jq -R . | jq -s .)
+fi
+
+passed=true
+failed_command=""
+if [[ "$docs_only" == "false" ]]; then
+  for idx in "${!commands[@]}"; do
+    command_text="${commands[$idx]}"
+    log_file="$artifact_dir/gate-$((idx + 1)).log"
+    command_exit=0
+    if (cd "$worktree" && harness_run_with_timeout "$HARNESS_PREPARE_TIMEOUT_SECONDS" bash -lc "$command_text") >"$log_file" 2>&1; then
+      command_exit=0
+    else
+      command_exit=$?
+    fi
+    if [[ "$command_exit" -ne 0 ]]; then
+      passed=false
+      if [[ "$command_exit" -eq 124 ]]; then
+        failed_command="$command_text (timed out after ${HARNESS_PREPARE_TIMEOUT_SECONDS}s)"
+      else
+        failed_command="$command_text"
+      fi
+      break
+    fi
+  done
+fi
+
+prepared_at=$(harness_now_utc)
+
+if [[ "$passed" == "false" ]]; then
+  cat >"$artifact_dir/gates.json" <<EOF
+{
+  "task_id": "$task_id",
+  "issue_number": ${issue_number:-null},
+  "pr_number": $pr_number,
+  "pr_url": "$pr_url",
+  "reviewed_head_sha": "$reviewed_head_sha",
+  "prepared_head_sha": "$current_head_sha",
+  "prepared_at": "$prepared_at",
+  "docs_only": $docs_only,
+  "status": "failed",
+  "failed_command": $(printf '%s' "$failed_command" | jq -Rs .),
+  "commands": $commands_json
+}
+EOF
+
+  cat >"$artifact_dir/prep.md" <<EOF
+# Prepare Result
+
+- task: \`$task_id\`
+- pr: $pr_url
+- reviewed_head_sha: \`$reviewed_head_sha\`
+- prepared_head_sha: \`$current_head_sha\`
+- verdict: failed
+- failed_command: \`$failed_command\`
+EOF
+
+  harness_update_task_status "$task_id" "prepare_failed" "prepare failed: $failed_command" "$pr_url"
+  if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+    harness_issue_blocked "$repo_slug" "$issue_number" "prepare failed for PR #$pr_number: $failed_command"
+  fi
+  printf 'prepare failed: %s\n' "$task_id"
+  exit 2
+fi
+
+cat >"$artifact_dir/gates.json" <<EOF
+{
+  "task_id": "$task_id",
+  "issue_number": ${issue_number:-null},
+  "pr_number": $pr_number,
+  "pr_url": "$pr_url",
+  "reviewed_head_sha": "$reviewed_head_sha",
+  "prepared_head_sha": "$current_head_sha",
+  "prepared_at": "$prepared_at",
+  "docs_only": $docs_only,
+  "status": "passed",
+  "failed_command": "",
+  "commands": $commands_json
+}
+EOF
+
+cat >"$artifact_dir/prep.md" <<EOF
+# Prepare Result
+
+- task: \`$task_id\`
+- pr: $pr_url
+- reviewed_head_sha: \`$reviewed_head_sha\`
+- prepared_head_sha: \`$current_head_sha\`
+- docs_only: \`$docs_only\`
+- verdict: passed
+EOF
+
+harness_update_task_status "$task_id" "prepared" "prepare passed" "$pr_url"
+if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+  harness_issue_comment "$repo_slug" "$issue_number" "Harness prepare passed for PR #$pr_number at head \`$current_head_sha\`."
+fi
+
+printf 'prepare passed: %s\n' "$task_id"

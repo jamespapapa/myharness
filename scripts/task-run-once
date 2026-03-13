@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=./harness-lib.sh
+source "$SCRIPT_DIR/harness-lib.sh"
+
+label_filter=""
+log_file=""
+dry_run=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --label)
+      label_filter="${2:-}"
+      shift 2
+      ;;
+    --log-file)
+      log_file="${2:-}"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+usage: scripts/task-run-once [--label <label>] [--log-file <path>] [--dry-run]
+EOF
+      exit 0
+      ;;
+    *)
+      harness_die "unknown argument: $1"
+      ;;
+  esac
+done
+
+harness_load_project_env
+harness_prepare_state
+
+if [[ -z "$label_filter" ]]; then
+  label_filter="$HARNESS_AUTONOMOUS_LABEL"
+fi
+
+if [[ -z "$log_file" ]]; then
+  log_file="$HARNESS_LOG_DIR/task-run-once.jsonl"
+fi
+
+emit_log() {
+  local status="$1"
+  local message="$2"
+  local issue_number="${3:-}"
+  local task_id="${4:-}"
+  local detail="${5:-}"
+
+  jq -nc \
+    --arg ts "$(harness_now_utc)" \
+    --arg status "$status" \
+    --arg message "$message" \
+    --arg label_filter "$label_filter" \
+    --arg task_id "$task_id" \
+    --arg detail "$detail" \
+    --argjson issue_number "${issue_number:-null}" \
+    '{
+      ts: $ts,
+      status: $status,
+      issue_number: $issue_number,
+      task_id: $task_id,
+      label_filter: $label_filter,
+      message: $message,
+      detail: $detail
+    }' >>"$log_file"
+}
+
+next_args=(--json)
+if [[ -n "$label_filter" ]]; then
+  next_args=(--label "$label_filter" --json)
+fi
+
+if ! next_output=$("$SCRIPT_DIR/task-next" "${next_args[@]}" 2>&1); then
+  if printf '%s' "$next_output" | rg -q "no eligible issue found"; then
+    emit_log "idle" "no eligible issue found"
+    printf 'idle: no eligible issue found\n'
+    exit 0
+  fi
+
+  emit_log "error" "task-next failed" "" "" "$next_output"
+  printf '%s\n' "$next_output" >&2
+  exit 1
+fi
+
+issue_number=$(printf '%s' "$next_output" | jq -r '.number')
+title=$(printf '%s' "$next_output" | jq -r '.title')
+task_id="issue-$issue_number"
+
+if [[ "$dry_run" -eq 1 ]]; then
+  emit_log "selected" "dry-run selected issue" "$issue_number" "$task_id" "$title"
+  printf 'selected issue #%s: %s\n' "$issue_number" "$title"
+  exit 0
+fi
+
+if ! start_output=$("$SCRIPT_DIR/task-start" --issue "$issue_number" 2>&1); then
+  emit_log "error" "task-start failed" "$issue_number" "$task_id" "$start_output"
+  printf '%s\n' "$start_output" >&2
+  exit 1
+fi
+
+task_json_path=$(harness_task_status_path "$task_id")
+[[ -f "$task_json_path" ]] || harness_die "missing task.json for $task_id"
+
+worktree=$(jq -r '.worktree' "$task_json_path")
+worker_log="$HARNESS_LOG_DIR/$task_id-$(date -u +%Y%m%dT%H%M%SZ).log"
+finish_script="$(harness_repo_root)/scripts/task-finish"
+repo_slug=$(jq -r '.repo_slug // ""' "$task_json_path")
+gh_token=""
+codex_env=()
+if harness_can_sync_github; then
+  gh_token="$(gh auth token 2>/dev/null || true)"
+fi
+if [[ -n "$gh_token" ]]; then
+  codex_env=(GH_TOKEN="$gh_token" GITHUB_TOKEN="$gh_token")
+fi
+
+emit_log "claimed" "claimed issue and launching Codex" "$issue_number" "$task_id" "$title"
+
+worker_prompt=$(cat <<EOF
+Read .harness-session/codex/AGENTS.md, .harness-session/codex/TASK.md, and .harness-session/codex/PR_BODY.md from the current repository root. Follow them exactly and complete the task end-to-end.
+
+Important execution split:
+
+- You own code changes, verification, and a focused local git commit.
+- The parent harness process will handle push + PR creation after you exit if a local commit exists.
+- Only call $finish_script yourself when the task is blocked or when you need to record a terminal failure reason.
+- Do not spawn child agents or wait on other agents from this task worker.
+- Finish in one pass and exit promptly after your local work is done.
+
+If you cannot complete the task, record the blocker with task-finish before exit.
+EOF
+)
+
+worker_exit=0
+if (cd "$worktree" && harness_run_with_timeout "$HARNESS_EXECUTOR_TIMEOUT_SECONDS" env "${codex_env[@]}" codex exec --disable child_agents_md --full-auto "$worker_prompt") >"$worker_log" 2>&1; then
+  worker_exit=0
+else
+  worker_exit=$?
+fi
+
+status=$(jq -r '.status // "unknown"' "$task_json_path")
+pr_url=$(jq -r '.pr_url // ""' "$task_json_path")
+note=$(jq -r '.note // ""' "$task_json_path")
+branch=$(jq -r '.branch' "$task_json_path")
+base_branch=$(jq -r '.base_branch' "$task_json_path")
+
+if [[ "$status" == "in_progress" || "$status" == "created" || "$status" == "unknown" ]]; then
+  mapfile -t changed_files < <(
+    {
+      git -C "$worktree" diff --name-only
+      git -C "$worktree" diff --cached --name-only
+      git -C "$worktree" ls-files -o --exclude-standard
+    } | sort -u | grep -v '^\.harness-session/' || true
+  )
+
+  if [[ "${#changed_files[@]}" -gt 0 ]]; then
+    git -C "$worktree" add -- "${changed_files[@]}"
+    git -C "$worktree" commit -m "fix: address issue #$issue_number" >/dev/null 2>&1 || true
+  fi
+
+  ahead_count=$(git -C "$worktree" rev-list --count "${base_branch}..HEAD" 2>/dev/null || echo 0)
+  if [[ "${ahead_count:-0}" -gt 0 ]]; then
+    if git -C "$worktree" push -u origin "$branch" >/dev/null 2>&1; then
+      pr_url=$(gh pr create -R "$repo_slug" --base "$base_branch" --head "$branch" --title "$title" --body-file "$(harness_task_dir "$task_id")/PR_BODY.md" 2>/dev/null || true)
+      if [[ -z "$pr_url" ]]; then
+        pr_url=$(gh pr list -R "$repo_slug" --head "$branch" --json url --jq '.[0].url // ""' 2>/dev/null || true)
+      fi
+      if [[ -n "$pr_url" ]]; then
+        "$SCRIPT_DIR/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null 2>&1 || true
+        status=$(jq -r '.status // "unknown"' "$task_json_path")
+        note=$(jq -r '.note // ""' "$task_json_path")
+      fi
+    fi
+  fi
+fi
+
+case "$status" in
+  pr_open)
+    emit_log "success" "worker opened PR" "$issue_number" "$task_id" "$pr_url"
+    printf 'success: issue #%s -> PR %s\n' "$issue_number" "$pr_url"
+    exit 0
+    ;;
+  done)
+    emit_log "success" "task reached done state" "$issue_number" "$task_id" "$pr_url"
+    printf 'success: issue #%s marked done\n' "$issue_number"
+    exit 0
+    ;;
+  blocked)
+    emit_log "blocked" "worker marked task blocked" "$issue_number" "$task_id" "$note"
+    printf 'blocked: issue #%s -> %s\n' "$issue_number" "$note"
+    exit 2
+    ;;
+  *)
+    if [[ "$worker_exit" -eq 124 ]]; then
+      recovery_reason="worker timed out after ${HARNESS_EXECUTOR_TIMEOUT_SECONDS}s without terminal harness state; log=$worker_log"
+    else
+      recovery_reason="worker exited without terminal harness state; exit=$worker_exit; log=$worker_log"
+    fi
+    "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
+    emit_log "error" "worker exited without terminal state" "$issue_number" "$task_id" "$recovery_reason"
+    printf 'error: %s\n' "$recovery_reason" >&2
+    exit 1
+    ;;
+esac

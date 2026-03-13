@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=./harness-lib.sh
+source "$SCRIPT_DIR/harness-lib.sh"
+
+issue_number=""
+task_id=""
+title=""
+body=""
+base_branch=""
+json_mode=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --issue)
+      issue_number="${2:-}"
+      shift 2
+      ;;
+    --task-id)
+      task_id="${2:-}"
+      shift 2
+      ;;
+    --title)
+      title="${2:-}"
+      shift 2
+      ;;
+    --body)
+      body="${2:-}"
+      shift 2
+      ;;
+    --base)
+      base_branch="${2:-}"
+      shift 2
+      ;;
+    --json)
+      json_mode=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+usage: scripts/task-create (--issue <n> | --task-id <id> --title <title>) [--body <text>] [--base <branch>] [--json]
+EOF
+      exit 0
+      ;;
+    *)
+      harness_die "unknown argument: $1"
+      ;;
+  esac
+done
+
+harness_load_project_env
+harness_prepare_state
+repo_root=$(harness_repo_root)
+repo_slug=""
+issue_url=""
+
+if [[ -n "$issue_number" ]]; then
+  repo_slug=$(harness_repo_slug 2>/dev/null || true)
+  if [[ -z "$repo_slug" ]]; then
+    harness_die "issue mode requires a GitHub repo slug"
+  fi
+
+  issue_json=$(harness_fetch_issue_json "$repo_slug" "$issue_number")
+  title=$(printf '%s' "$issue_json" | jq -r '.title')
+  body=$(printf '%s' "$issue_json" | jq -r '.body // ""')
+  issue_url=$(printf '%s' "$issue_json" | jq -r '.url')
+  task_id="issue-$issue_number"
+else
+  [[ -n "$task_id" ]] || harness_die "local tasks require --task-id"
+  [[ -n "$title" ]] || harness_die "local tasks require --title"
+  issue_json=""
+fi
+
+if [[ -z "$base_branch" ]]; then
+  base_branch="$HARNESS_BASE_BRANCH"
+fi
+
+harness_ensure_base_branch "$base_branch"
+
+if [[ -n "$issue_number" ]]; then
+  branch="${HARNESS_BRANCH_PREFIX}${issue_number}"
+else
+  branch="${HARNESS_GENERIC_BRANCH_PREFIX}$(harness_slugify "$task_id")"
+fi
+
+worktree="$HARNESS_WORKTREE_ROOT/$task_id"
+task_dir="$HARNESS_TASK_DIR/$task_id"
+codex_session="$worktree/.harness-session/codex"
+openclaw_session="$worktree/.harness-session/openclaw"
+finish_script="$repo_root/scripts/task-finish"
+
+mkdir -p "$HARNESS_WORKTREE_ROOT" "$task_dir"
+
+if [[ ! -e "$worktree" ]]; then
+  if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$repo_root" worktree add "$worktree" "$branch" >/dev/null
+  else
+    git -C "$repo_root" worktree add -b "$branch" "$worktree" "$base_branch" >/dev/null
+  fi
+fi
+
+mkdir -p "$codex_session" "$openclaw_session"
+cp "$repo_root/.harness/profiles/codex/AGENTS.md" "$codex_session/AGENTS.md"
+cp "$repo_root/.harness/profiles/openclaw-task/AGENTS.md" "$openclaw_session/AGENTS.md"
+
+cat >"$task_dir/task.json" <<EOF
+{
+  "task_id": "$task_id",
+  "issue_number": ${issue_number:-null},
+  "title": $(printf '%s' "$title" | jq -Rs .),
+  "issue_url": $(printf '%s' "$issue_url" | jq -Rs .),
+  "repo_slug": $(printf '%s' "$repo_slug" | jq -Rs .),
+  "branch": $(printf '%s' "$branch" | jq -Rs .),
+  "base_branch": $(printf '%s' "$base_branch" | jq -Rs .),
+  "worktree": $(printf '%s' "$worktree" | jq -Rs .),
+  "status": "created",
+  "created_at": "$(harness_now_utc)"
+}
+EOF
+
+if [[ -n "$issue_json" ]]; then
+  printf '%s\n' "$issue_json" >"$task_dir/issue.json"
+fi
+
+cat >"$task_dir/PR_BODY.md" <<EOF
+## Summary
+
+- Problem:
+- Why it matters:
+- What changed:
+- What did not change:
+
+## Testing
+
+- 
+
+## Risks
+
+- 
+
+$(if [[ -n "$issue_number" ]]; then printf 'Fixes %s#%s\n' "$repo_slug" "$issue_number"; fi)
+EOF
+
+for session_dir in "$codex_session" "$openclaw_session"; do
+  cat >"$session_dir/TASK.md" <<EOF
+# Task Contract
+
+- task_id: \`$task_id\`
+- title: $title
+- repo root: \`$worktree\`
+- branch: \`$branch\`
+- base branch: \`$base_branch\`
+$(if [[ -n "$issue_number" ]]; then printf -- '- issue: `%s#%s`\n- issue url: %s\n' "$repo_slug" "$issue_number" "$issue_url"; fi)
+
+## Scope
+
+- Work only on this one task.
+- Keep edits inside the paired worktree at \`../..\`.
+- Prefer minimal changes that can land as a focused PR.
+
+## Context
+
+$(if [[ -n "$body" ]]; then printf '%s\n' "$body"; else printf 'No additional body was provided.\n'; fi)
+
+## Required Outputs
+
+- Update code only in the paired worktree.
+- Reuse \`$task_dir/PR_BODY.md\` as the PR draft.
+- Sync status with:
+  - PR opened: \`$finish_script --issue ${issue_number:-<n>} --pr <url>\`
+  - Blocked: \`$finish_script --issue ${issue_number:-<n>} --blocked "<reason>"\`
+  - Merged: \`$finish_script --issue ${issue_number:-<n>} --merged --pr <url>\`
+EOF
+
+  cp "$task_dir/PR_BODY.md" "$session_dir/PR_BODY.md"
+done
+
+if [[ "$json_mode" -eq 1 ]]; then
+  jq -n \
+    --arg task_id "$task_id" \
+    --arg title "$title" \
+    --arg branch "$branch" \
+    --arg worktree "$worktree" \
+    --arg codex_session "$codex_session" \
+    --arg openclaw_session "$openclaw_session" \
+    '{
+      task_id: $task_id,
+      title: $title,
+      branch: $branch,
+      worktree: $worktree,
+      codex_session: $codex_session,
+      openclaw_session: $openclaw_session
+    }'
+  exit 0
+fi
+
+harness_print_task_summary "$task_id" "$title" "$branch" "$worktree" "$codex_session" "$openclaw_session"

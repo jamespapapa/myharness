@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=./harness-lib.sh
+source "$SCRIPT_DIR/harness-lib.sh"
+
+issue_number=""
+task_id=""
+pr_url=""
+blocked_reason=""
+merged=0
+unclaim=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --issue)
+      issue_number="${2:-}"
+      shift 2
+      ;;
+    --task-id)
+      task_id="${2:-}"
+      shift 2
+      ;;
+    --pr)
+      pr_url="${2:-}"
+      shift 2
+      ;;
+    --blocked)
+      blocked_reason="${2:-}"
+      shift 2
+      ;;
+    --merged)
+      merged=1
+      shift
+      ;;
+    --unclaim)
+      unclaim=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+usage: scripts/task-finish [--issue <n> | --task-id <id>] [--pr <url>] [--blocked <reason>] [--merged] [--unclaim]
+EOF
+      exit 0
+      ;;
+    *)
+      harness_die "unknown argument: $1"
+      ;;
+  esac
+done
+
+if [[ -z "$issue_number" && -z "$task_id" ]]; then
+  harness_die "provide --issue or --task-id"
+fi
+
+if [[ -n "$issue_number" && -z "$task_id" ]]; then
+  task_id="issue-$issue_number"
+fi
+
+harness_load_project_env
+harness_prepare_state
+harness_acquire_lock
+trap 'harness_release_lock' EXIT
+repo_slug=""
+claim_key=""
+
+if [[ -n "$issue_number" ]]; then
+  repo_slug=$(harness_repo_slug 2>/dev/null || true)
+  claim_key=$(harness_claim_key "$repo_slug" "$issue_number" "$task_id")
+else
+  claim_key=$(harness_claim_key "" "" "$task_id")
+fi
+
+if [[ "$unclaim" -eq 1 ]]; then
+  harness_remove_claim "$claim_key"
+  harness_update_task_status "$task_id" "created" "claim cleared"
+  if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+    harness_issue_unclaim "$repo_slug" "$issue_number"
+  fi
+  printf 'claim cleared: %s\n' "$task_id"
+  exit 0
+fi
+
+if [[ "$merged" -eq 1 ]]; then
+  harness_remove_claim "$claim_key"
+  harness_update_task_status "$task_id" "done" "merged" "$pr_url"
+  if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+    harness_issue_done "$repo_slug" "$issue_number" "$pr_url"
+  fi
+  printf 'task marked done: %s\n' "$task_id"
+  exit 0
+fi
+
+if [[ -n "$blocked_reason" ]]; then
+  harness_remove_claim "$claim_key"
+  harness_update_task_status "$task_id" "blocked" "$blocked_reason" ""
+  if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+    harness_issue_blocked "$repo_slug" "$issue_number" "$blocked_reason"
+  fi
+  printf 'task marked blocked: %s\n' "$task_id"
+  exit 0
+fi
+
+if [[ -n "$pr_url" ]]; then
+  harness_remove_claim "$claim_key"
+  harness_update_task_status "$task_id" "pr_open" "pr opened" "$pr_url"
+  if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+    harness_issue_pr_open "$repo_slug" "$issue_number" "$pr_url"
+  fi
+  printf 'task marked pr_open: %s\n' "$task_id"
+  exit 0
+fi
+
+harness_die "no finish action was provided"

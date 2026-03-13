@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=./harness-lib.sh
+source "$SCRIPT_DIR/harness-lib.sh"
+
+write_land_artifacts() {
+  local land_dir merge_sha
+  merge_sha="${1:-}"
+  land_dir=$(harness_artifact_dir "land" "$task_id")
+  harness_ensure_artifact_dir "land" "$task_id"
+
+  cat >"$land_dir/land.json" <<EOF
+{
+  "task_id": "$task_id",
+  "issue_number": ${issue_number:-null},
+  "pr_number": $pr_number,
+  "pr_url": "$pr_url",
+  "reviewed_head_sha": "$reviewed_head_sha",
+  "prepared_head_sha": "$prepared_head_sha",
+  "merge_sha": $(printf '%s' "$merge_sha" | jq -Rs .),
+  "merged_at": "$(harness_now_utc)",
+  "merge_method": "$HARNESS_MERGE_METHOD",
+  "status": "merged"
+}
+EOF
+
+  cat >"$land_dir/land.md" <<EOF
+# Land Result
+
+- task: \`$task_id\`
+- pr: $pr_url
+- reviewed_head_sha: \`$reviewed_head_sha\`
+- prepared_head_sha: \`$prepared_head_sha\`
+- merge_sha: \`$merge_sha\`
+- merge_method: \`$HARNESS_MERGE_METHOD\`
+EOF
+}
+
+cleanup_land() {
+  local exit_code="$?"
+  local current_status=""
+  if [[ "$exit_code" -eq 0 || -z "${task_id:-}" ]]; then
+    return 0
+  fi
+
+  current_status=$(harness_task_field "$task_id" '.status // ""' 2>/dev/null || true)
+  if [[ "$current_status" == "landing" ]]; then
+    harness_update_task_status "$task_id" "land_failed" "land script aborted unexpectedly" "${pr_url:-}"
+  fi
+}
+
+trap cleanup_land EXIT
+
+issue_number=""
+task_id=""
+use_next=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --issue)
+      issue_number="${2:-}"
+      shift 2
+      ;;
+    --task-id)
+      task_id="${2:-}"
+      shift 2
+      ;;
+    --next)
+      use_next=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+usage: scripts/task-land [--issue <n> | --task-id <id> | --next]
+EOF
+      exit 0
+      ;;
+    *)
+      harness_die "unknown argument: $1"
+      ;;
+  esac
+done
+
+harness_load_project_env
+harness_prepare_state
+
+if [[ "$use_next" -eq 1 ]]; then
+  next_task=$(harness_find_next_task_by_status "prepared" || true)
+  [[ -n "$next_task" ]] || harness_die "no prepared task found"
+  task_id=$(printf '%s' "$next_task" | jq -r '.task_id')
+fi
+
+task_id=$(harness_resolve_task_id "$issue_number" "$task_id")
+harness_task_exists "$task_id" || harness_die "task not found: $task_id"
+
+status=$(harness_task_field "$task_id" '.status // ""')
+if [[ "$status" == "prepared" ]]; then
+  harness_transition_task_status "$task_id" "prepared" "landing" "land in progress" || harness_die "task $task_id was claimed by another land worker"
+elif [[ "$status" != "landing" && "$status" != "done" ]]; then
+  harness_die "task $task_id is not prepared/landing/done (status=$status)"
+fi
+if [[ "$status" == "done" ]]; then
+  printf 'already done: %s\n' "$task_id"
+  exit 0
+fi
+
+task_json=$(harness_task_json "$task_id")
+pr_url=$(printf '%s' "$task_json" | jq -r '.pr_url // ""')
+issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // empty')
+repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
+
+[[ -n "$pr_url" ]] || harness_die "task $task_id has no pr_url"
+
+review_json="$(harness_artifact_dir "reviews" "$task_id")/review.json"
+prep_json="$(harness_artifact_dir "prep" "$task_id")/gates.json"
+[[ -f "$review_json" ]] || harness_die "missing review artifact: $review_json"
+[[ -f "$prep_json" ]] || harness_die "missing prepare artifact: $prep_json"
+
+review_verdict=$(jq -r '.verdict' "$review_json")
+reviewed_head_sha=$(jq -r '.reviewed_head_sha' "$review_json")
+prepare_status=$(jq -r '.status' "$prep_json")
+prepared_head_sha=$(jq -r '.prepared_head_sha' "$prep_json")
+
+[[ "$review_verdict" == "approved" ]] || harness_die "review verdict is not approved for $task_id"
+[[ "$prepare_status" == "passed" ]] || harness_die "prepare status is not passed for $task_id"
+
+pr_json=$(harness_fetch_pr_json "$pr_url")
+pr_number=$(printf '%s' "$pr_json" | jq -r '.number')
+pr_state=$(printf '%s' "$pr_json" | jq -r '.state')
+current_head_sha=$(printf '%s' "$pr_json" | jq -r '.headRefOid')
+
+if [[ "$pr_state" == "MERGED" ]]; then
+  merged_pr_json=$(gh pr view "$pr_url" --json number,url,state,mergeCommit)
+  merge_sha=$(printf '%s' "$merged_pr_json" | jq -r '.mergeCommit.oid // ""')
+  write_land_artifacts "$merge_sha"
+  if [[ -n "$issue_number" ]]; then
+    "$SCRIPT_DIR/task-finish" --issue "$issue_number" --merged --pr "$pr_url" >/dev/null
+  else
+    harness_update_task_status "$task_id" "done" "merged externally" "$pr_url"
+  fi
+  printf 'already merged: %s\n' "$task_id"
+  exit 0
+fi
+
+[[ "$pr_state" == "OPEN" ]] || harness_die "PR is not open: $pr_url (state=$pr_state)"
+
+if [[ "$current_head_sha" != "$reviewed_head_sha" || "$current_head_sha" != "$prepared_head_sha" ]]; then
+  harness_update_task_status "$task_id" "pr_open" "review/prepare artifacts stale; PR head changed" "$pr_url"
+  if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+    harness_issue_comment "$repo_slug" "$issue_number" "Harness note: land deferred because review/prepare artifacts are stale for PR #$pr_number."
+  fi
+  printf 'land deferred due to stale artifacts: %s\n' "$task_id"
+  exit 0
+fi
+
+if [[ "$HARNESS_REQUIRE_GREEN_CHECKS" == "1" ]]; then
+  if harness_pr_checks_any_pending "$pr_json"; then
+    harness_update_task_status "$task_id" "prepared" "waiting for remote status checks" "$pr_url"
+    printf 'land waiting for checks: %s\n' "$task_id"
+    exit 0
+  fi
+
+  if harness_pr_checks_any_failed "$pr_json"; then
+    harness_update_task_status "$task_id" "land_failed" "remote status checks failed" "$pr_url"
+    if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+      harness_issue_blocked "$repo_slug" "$issue_number" "land blocked for PR #$pr_number because remote status checks failed"
+    fi
+    printf 'land blocked by failed checks: %s\n' "$task_id"
+    exit 2
+  fi
+
+  if ! harness_pr_checks_all_green "$pr_json"; then
+    harness_update_task_status "$task_id" "prepared" "waiting for required checks" "$pr_url"
+    printf 'land waiting for required checks: %s\n' "$task_id"
+    exit 0
+  fi
+fi
+
+merge_flag="--squash"
+case "$HARNESS_MERGE_METHOD" in
+  squash) merge_flag="--squash" ;;
+  merge) merge_flag="--merge" ;;
+  rebase) merge_flag="--rebase" ;;
+  *) harness_die "unsupported HARNESS_MERGE_METHOD: $HARNESS_MERGE_METHOD" ;;
+esac
+
+land_exit=0
+if harness_run_with_timeout "$HARNESS_LAND_TIMEOUT_SECONDS" gh pr merge "$pr_url" "$merge_flag" --delete-branch >/dev/null 2>&1; then
+  land_exit=0
+else
+  land_exit=$?
+fi
+
+if [[ "$land_exit" -ne 0 ]]; then
+  merged_pr_json=$(gh pr view "$pr_url" --json number,url,state,mergeCommit 2>/dev/null || true)
+  if [[ -n "$merged_pr_json" ]] && [[ "$(printf '%s' "$merged_pr_json" | jq -r '.state // ""')" == "MERGED" ]]; then
+    merge_sha=$(printf '%s' "$merged_pr_json" | jq -r '.mergeCommit.oid // ""')
+    write_land_artifacts "$merge_sha"
+    if [[ -n "$issue_number" ]]; then
+      "$SCRIPT_DIR/task-finish" --issue "$issue_number" --merged --pr "$pr_url" >/dev/null
+    else
+      harness_update_task_status "$task_id" "done" "merged" "$pr_url"
+    fi
+    printf 'merged: %s\n' "$task_id"
+    exit 0
+  fi
+
+  if [[ "$land_exit" -eq 124 ]]; then
+    land_reason="gh pr merge timed out after ${HARNESS_LAND_TIMEOUT_SECONDS}s"
+  else
+    land_reason="gh pr merge failed"
+  fi
+  harness_update_task_status "$task_id" "land_failed" "$land_reason" "$pr_url"
+  if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+    harness_issue_blocked "$repo_slug" "$issue_number" "land failed for PR #$pr_number: $land_reason"
+  fi
+  harness_die "gh pr merge failed for $task_id"
+fi
+
+merged_pr_json=$(harness_run_with_timeout "$HARNESS_LAND_TIMEOUT_SECONDS" gh pr view "$pr_url" --json number,url,state,mergeCommit)
+merge_sha=$(printf '%s' "$merged_pr_json" | jq -r '.mergeCommit.oid // ""')
+write_land_artifacts "$merge_sha"
+
+if [[ -n "$issue_number" ]]; then
+  "$SCRIPT_DIR/task-finish" --issue "$issue_number" --merged --pr "$pr_url" >/dev/null
+else
+  harness_update_task_status "$task_id" "done" "merged" "$pr_url"
+fi
+
+printf 'merged: %s\n' "$task_id"

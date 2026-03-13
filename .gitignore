@@ -1,0 +1,13 @@
+.harness-manager/
+.harness-session/
+.harness/logs/
+.harness/state/
+.harness/tasks/
+.idea/
+artifacts/reviews/*/review-run.log
+artifacts/reviews/*/session/
+artifacts/*/*/pr.json
+artifacts/*/*/task.json
+.omx/logs/
+.omx/state/
+.omx/metrics.json

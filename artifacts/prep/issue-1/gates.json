@@ -1,0 +1,13 @@
+{
+  "task_id": "issue-1",
+  "issue_number": 1,
+  "pr_number": 2,
+  "pr_url": "https://github.com/jamespapapa/myharness/pull/2",
+  "reviewed_head_sha": "57ad5015ab891c41d44724d21b51b330a9152b07",
+  "prepared_head_sha": "57ad5015ab891c41d44724d21b51b330a9152b07",
+  "prepared_at": "2026-03-13T06:57:18Z",
+  "docs_only": true,
+  "status": "passed",
+  "failed_command": "",
+  "commands": []
+}

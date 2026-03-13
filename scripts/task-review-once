@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=./harness-lib.sh
+source "$SCRIPT_DIR/harness-lib.sh"
+
+log_file=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --log-file)
+      log_file="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      echo "usage: scripts/task-review-once [--log-file <path>]"
+      exit 0
+      ;;
+    *)
+      harness_die "unknown argument: $1"
+      ;;
+  esac
+done
+
+harness_load_project_env
+harness_prepare_state
+[[ -n "$log_file" ]] || log_file="$HARNESS_LOG_DIR/task-review-once.jsonl"
+
+emit_log() {
+  jq -nc --arg ts "$(harness_now_utc)" --arg status "$1" --arg task_id "${2:-}" --arg detail "${3:-}" \
+    '{ts:$ts,status:$status,task_id:$task_id,detail:$detail}' >>"$log_file"
+}
+
+next_task=$(harness_find_next_task_by_status "pr_open" || true)
+if [[ -z "$next_task" ]]; then
+  emit_log "idle" "" "no pr_open task found"
+  printf 'idle: no pr_open task found\n'
+  exit 0
+fi
+
+task_id=$(printf '%s' "$next_task" | jq -r '.task_id')
+
+if ! output=$("$SCRIPT_DIR/task-review" --task-id "$task_id" 2>&1); then
+  if printf '%s' "$output" | rg -q "claimed by another review worker"; then
+    emit_log "waiting" "$task_id" "$output"
+    printf '%s\n' "$output"
+    exit 0
+  fi
+  status=$(harness_task_field "$task_id" '.status // ""' 2>/dev/null || true)
+  if [[ "$status" == "review_failed" || "$status" == "blocked" ]]; then
+    emit_log "blocked" "$task_id" "$output"
+    printf '%s\n' "$output"
+    exit 2
+  fi
+  emit_log "error" "$task_id" "$output"
+  printf '%s\n' "$output" >&2
+  exit 1
+fi
+
+status=$(harness_task_field "$task_id" '.status // ""')
+case "$status" in
+  reviewed)
+    emit_log "success" "$task_id" "$output"
+    ;;
+  pr_open)
+    emit_log "waiting" "$task_id" "$output"
+    ;;
+  *)
+    emit_log "error" "$task_id" "$output"
+    ;;
+esac
+
+printf '%s\n' "$output"

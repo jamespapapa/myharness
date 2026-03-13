@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=./harness-lib.sh
+source "$SCRIPT_DIR/harness-lib.sh"
+
+cleanup_review() {
+  local exit_code="$?"
+  local current_status=""
+  if [[ "$exit_code" -eq 0 || -z "${task_id:-}" ]]; then
+    return 0
+  fi
+
+  current_status=$(harness_task_field "$task_id" '.status // ""' 2>/dev/null || true)
+  if [[ "$current_status" == "reviewing" ]]; then
+    harness_update_task_status "$task_id" "review_failed" "review script aborted unexpectedly" "${pr_url:-}"
+  fi
+}
+
+trap cleanup_review EXIT
+
+issue_number=""
+task_id=""
+use_next=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --issue)
+      issue_number="${2:-}"
+      shift 2
+      ;;
+    --task-id)
+      task_id="${2:-}"
+      shift 2
+      ;;
+    --next)
+      use_next=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+usage: scripts/task-review [--issue <n> | --task-id <id> | --next]
+EOF
+      exit 0
+      ;;
+    *)
+      harness_die "unknown argument: $1"
+      ;;
+  esac
+done
+
+harness_load_project_env
+harness_prepare_state
+
+if [[ "$use_next" -eq 1 ]]; then
+  next_task=$(harness_find_next_task_by_status "pr_open" || true)
+  [[ -n "$next_task" ]] || harness_die "no pr_open task found"
+  task_id=$(printf '%s' "$next_task" | jq -r '.task_id')
+fi
+
+task_id=$(harness_resolve_task_id "$issue_number" "$task_id")
+harness_task_exists "$task_id" || harness_die "task not found: $task_id"
+
+status=$(harness_task_field "$task_id" '.status // ""')
+if [[ "$status" == "pr_open" ]]; then
+  harness_transition_task_status "$task_id" "pr_open" "reviewing" "review in progress" || harness_die "task $task_id was claimed by another review worker"
+elif [[ "$status" != "reviewing" ]]; then
+  harness_die "task $task_id is not pr_open/reviewing (status=$status)"
+fi
+
+task_json=$(harness_task_json "$task_id")
+pr_url=$(printf '%s' "$task_json" | jq -r '.pr_url // ""')
+worktree=$(printf '%s' "$task_json" | jq -r '.worktree')
+title=$(printf '%s' "$task_json" | jq -r '.title')
+issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // empty')
+repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
+
+[[ -n "$pr_url" ]] || harness_die "task $task_id has no pr_url"
+
+pr_json=$(harness_fetch_pr_json "$pr_url")
+pr_number=$(printf '%s' "$pr_json" | jq -r '.number')
+pr_state=$(printf '%s' "$pr_json" | jq -r '.state')
+is_draft=$(printf '%s' "$pr_json" | jq -r '.isDraft')
+base_ref=$(printf '%s' "$pr_json" | jq -r '.baseRefName')
+head_ref=$(printf '%s' "$pr_json" | jq -r '.headRefName')
+head_sha=$(printf '%s' "$pr_json" | jq -r '.headRefOid')
+
+[[ "$pr_state" == "OPEN" ]] || harness_die "PR is not open: $pr_url (state=$pr_state)"
+[[ "$is_draft" == "false" ]] || harness_die "PR is draft: $pr_url"
+
+artifact_dir=$(harness_artifact_dir "reviews" "$task_id")
+harness_ensure_artifact_dir "reviews" "$task_id"
+review_md="$artifact_dir/review.md"
+review_json="$artifact_dir/review.json"
+review_log="$artifact_dir/review-run.log"
+printf '%s\n' "$pr_json" >"$artifact_dir/pr.json"
+printf '%s\n' "$task_json" >"$artifact_dir/task.json"
+
+review_session="$artifact_dir/session"
+mkdir -p "$review_session"
+diff_patch="$review_session/DIFF.patch"
+cp "$(harness_repo_root)/.harness/profiles/codex-review/AGENTS.md" "$review_session/AGENTS.md"
+git -C "$worktree" diff --unified=40 "$base_ref...$head_sha" >"$diff_patch"
+
+cat >"$review_session/REVIEW_TASK.md" <<EOF
+# Review Task
+
+- task_id: \`$task_id\`
+- issue_number: \`${issue_number:-none}\`
+- pr_number: \`$pr_number\`
+- pr_url: $pr_url
+- worktree: \`$worktree\`
+- base_ref: \`$base_ref\`
+- head_ref: \`$head_ref\`
+- head_sha: \`$head_sha\`
+- artifact_markdown: \`$review_md\`
+- artifact_json: \`$review_json\`
+- diff_patch: \`$diff_patch\`
+
+## Mission
+
+Review the current PR head against \`$base_ref\` with a code review mindset.
+
+Primary inputs for this review:
+
+- \`REVIEW_TASK.md\`
+- \`DIFF.patch\`
+- the changed files named in \`DIFF.patch\`, only if you need extra context
+
+Focus on:
+
+- correctness regressions,
+- unsafe assumptions,
+- missing validation,
+- missing tests or proof,
+- merge risk.
+
+Do not edit code. Do not change git state. Write artifacts only.
+
+## Required Markdown Artifact
+
+Write \`$review_md\` with:
+
+1. Verdict: \`approved\` or \`rejected\`
+2. Short summary
+3. Findings
+4. Residual risks
+
+## Required JSON Artifact
+
+Write \`$review_json\` with this exact schema:
+
+\`\`\`json
+{
+  "task_id": "$task_id",
+  "issue_number": ${issue_number:-null},
+  "pr_number": $pr_number,
+  "pr_url": "$pr_url",
+  "reviewed_head_sha": "$head_sha",
+  "reviewed_at": "ISO-8601 UTC timestamp",
+  "verdict": "approved or rejected",
+  "summary": "short summary",
+  "blocking_findings": ["..."],
+  "residual_risks": ["..."]
+}
+\`\`\`
+
+If the PR should not land, set \`verdict\` to \`rejected\` and explain why.
+EOF
+
+review_prompt=$(cat <<EOF
+Read AGENTS.md and REVIEW_TASK.md in the current directory. Review the PR head without modifying code, and write the required artifacts exactly where requested.
+
+Constraints:
+
+- Do the review yourself in this session.
+- Do not spawn child agents or wait on other agents.
+- Read DIFF.patch and prefer it over repo-wide shell exploration.
+- Only open the changed files named in the diff if needed.
+- Finish immediately after writing the artifacts.
+EOF
+)
+
+review_exit=0
+if (cd "$review_session" && harness_run_with_timeout "$HARNESS_REVIEW_TIMEOUT_SECONDS" codex exec -c model_reasoning_effort='medium' --disable child_agents_md --add-dir "$artifact_dir" --full-auto "$review_prompt") >"$review_log" 2>&1; then
+  review_exit=0
+else
+  review_exit=$?
+fi
+
+if [[ "$review_exit" -ne 0 ]]; then
+  if [[ "$review_exit" -eq 124 ]]; then
+    review_reason="review runtime timed out after ${HARNESS_REVIEW_TIMEOUT_SECONDS}s; see $review_log"
+  else
+    review_reason="review runtime failed; see $review_log"
+  fi
+  harness_update_task_status "$task_id" "review_failed" "$review_reason" "$pr_url"
+  if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+    harness_issue_blocked "$repo_slug" "$issue_number" "$review_reason"
+  fi
+  harness_die "review runtime failed for $task_id"
+fi
+
+[[ -s "$review_md" ]] || harness_die "missing review markdown: $review_md"
+[[ -s "$review_json" ]] || harness_die "missing review json: $review_json"
+
+verdict=$(jq -r '.verdict' "$review_json")
+reviewed_head_sha=$(jq -r '.reviewed_head_sha' "$review_json")
+summary=$(jq -r '.summary // ""' "$review_json")
+
+current_pr_json=$(harness_fetch_pr_json "$pr_url")
+current_head_sha=$(printf '%s' "$current_pr_json" | jq -r '.headRefOid')
+
+if [[ "$reviewed_head_sha" != "$head_sha" || "$current_head_sha" != "$head_sha" ]]; then
+  harness_update_task_status "$task_id" "pr_open" "review artifact stale; PR head moved during review" "$pr_url"
+  if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+    harness_issue_comment "$repo_slug" "$issue_number" "Harness note: review artifact became stale because the PR head changed during review."
+  fi
+  printf 'review stale: %s\n' "$task_id"
+  exit 0
+fi
+
+case "$verdict" in
+  approved)
+    harness_update_task_status "$task_id" "reviewed" "$summary" "$pr_url"
+    if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+      harness_issue_comment "$repo_slug" "$issue_number" "Harness review approved for PR #$pr_number at head \`$head_sha\`."
+    fi
+    printf 'review approved: %s\n' "$task_id"
+    ;;
+  rejected)
+    harness_update_task_status "$task_id" "review_failed" "$summary" "$pr_url"
+    if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+      harness_issue_blocked "$repo_slug" "$issue_number" "review rejected for PR #$pr_number"
+    fi
+    printf 'review rejected: %s\n' "$task_id"
+    exit 2
+    ;;
+  *)
+    harness_update_task_status "$task_id" "review_failed" "invalid review verdict: $verdict" "$pr_url"
+    harness_die "invalid review verdict for $task_id: $verdict"
+    ;;
+esac

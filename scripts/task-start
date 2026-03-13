@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=./harness-lib.sh
+source "$SCRIPT_DIR/harness-lib.sh"
+
+issue_number=""
+task_id=""
+title=""
+body=""
+label_filter=""
+launch=""
+use_next=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --issue)
+      issue_number="${2:-}"
+      shift 2
+      ;;
+    --task-id)
+      task_id="${2:-}"
+      shift 2
+      ;;
+    --title)
+      title="${2:-}"
+      shift 2
+      ;;
+    --body)
+      body="${2:-}"
+      shift 2
+      ;;
+    --next)
+      use_next=1
+      shift
+      ;;
+    --label)
+      label_filter="${2:-}"
+      shift 2
+      ;;
+    --launch)
+      launch="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      cat <<'EOF'
+usage: scripts/task-start [--issue <n> | --next | --task-id <id> --title <title>] [--label <label>] [--body <text>] [--launch codex]
+EOF
+      exit 0
+      ;;
+    *)
+      harness_die "unknown argument: $1"
+      ;;
+  esac
+done
+
+if [[ "$use_next" -eq 1 ]]; then
+  next_args=(--json)
+  if [[ -n "$label_filter" ]]; then
+    next_args=(--label "$label_filter" --json)
+  fi
+  next_json=$("$SCRIPT_DIR/task-next" "${next_args[@]}")
+  issue_number=$(printf '%s' "$next_json" | jq -r '.number')
+fi
+
+if [[ -n "$issue_number" ]]; then
+  task_id="issue-$issue_number"
+fi
+
+if [[ -z "$issue_number" && -z "$task_id" ]]; then
+  harness_die "choose --issue, --next, or a local task via --task-id/--title"
+fi
+
+harness_load_project_env
+harness_prepare_state
+harness_acquire_lock
+trap 'harness_release_lock' EXIT
+repo_slug=""
+claim_key=""
+
+if [[ -n "$issue_number" ]]; then
+  repo_slug=$(harness_repo_slug)
+  claim_key=$(harness_claim_key "$repo_slug" "$issue_number" "$task_id")
+  if jq -e --arg key "$claim_key" 'has($key)' "$HARNESS_CLAIMS_FILE" >/dev/null 2>&1; then
+    harness_die "issue is already claimed: $claim_key"
+  fi
+else
+  claim_key=$(harness_claim_key "" "" "$task_id")
+  if jq -e --arg key "$claim_key" 'has($key)' "$HARNESS_CLAIMS_FILE" >/dev/null 2>&1; then
+    harness_die "task is already claimed: $claim_key"
+  fi
+fi
+
+create_args=()
+if [[ -n "$issue_number" ]]; then
+  create_args+=(--issue "$issue_number")
+else
+  create_args+=(--task-id "$task_id" --title "$title")
+  if [[ -n "$body" ]]; then
+    create_args+=(--body "$body")
+  fi
+fi
+
+task_json=$("$SCRIPT_DIR/task-create" "${create_args[@]}" --json)
+task_id=$(printf '%s' "$task_json" | jq -r '.task_id')
+title=$(printf '%s' "$task_json" | jq -r '.title')
+branch=$(printf '%s' "$task_json" | jq -r '.branch')
+worktree=$(printf '%s' "$task_json" | jq -r '.worktree')
+codex_session=$(printf '%s' "$task_json" | jq -r '.codex_session')
+openclaw_session=$(printf '%s' "$task_json" | jq -r '.openclaw_session')
+
+if [[ -n "$issue_number" ]]; then
+  harness_write_claim "$claim_key" "$repo_slug" "$issue_number" "$task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "in_progress"
+  harness_update_task_status "$task_id" "in_progress"
+  if harness_can_sync_github; then
+    harness_issue_started "$repo_slug" "$issue_number" "$task_id" "$branch" "$worktree"
+  fi
+else
+  harness_write_claim "$claim_key" "" "" "$task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "in_progress"
+  harness_update_task_status "$task_id" "in_progress"
+fi
+
+printf 'task ready: %s\n' "$task_id"
+printf 'title: %s\n' "$title"
+printf 'branch: %s\n' "$branch"
+printf 'worktree: %s\n' "$worktree"
+printf 'codex session: %s\n' "$codex_session"
+printf 'openclaw session: %s\n' "$openclaw_session"
+printf '\n'
+printf 'Codex command:\n'
+printf '  cd %q && codex\n' "$codex_session"
+printf 'OpenClaw task command:\n'
+printf '  cd %q && openclaw\n' "$openclaw_session"
+
+if [[ "$launch" == "codex" ]]; then
+  harness_notice "launching Codex in $codex_session"
+  finish_script="$(harness_repo_root)/scripts/task-finish"
+  gh_token="$(gh auth token 2>/dev/null || true)"
+  (
+    cd "$worktree"
+    exec env GH_TOKEN="$gh_token" GITHUB_TOKEN="$gh_token" codex exec --full-auto "Read .harness-session/codex/AGENTS.md, .harness-session/codex/TASK.md, and .harness-session/codex/PR_BODY.md from the current repository root. Follow them exactly and complete the task end-to-end. Use $finish_script for final task state updates."
+  )
+fi

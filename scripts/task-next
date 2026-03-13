@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=./harness-lib.sh
+source "$SCRIPT_DIR/harness-lib.sh"
+
+label_filter=""
+limit=100
+json_mode=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --label)
+      label_filter="${2:-}"
+      shift 2
+      ;;
+    --limit)
+      limit="${2:-100}"
+      shift 2
+      ;;
+    --json)
+      json_mode=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+usage: scripts/task-next [--label <label>] [--limit <n>] [--json]
+EOF
+      exit 0
+      ;;
+    *)
+      harness_die "unknown argument: $1"
+      ;;
+  esac
+done
+
+harness_can_sync_github || harness_die "GitHub sync is unavailable; check gh auth and repo remote."
+harness_load_project_env
+repo=$(harness_repo_slug)
+claimed=$(harness_claimed_issue_numbers_json "$repo")
+
+issues=$(gh api "repos/$repo/issues?state=open&per_page=$limit&sort=created&direction=asc")
+
+selected=$(printf '%s' "$issues" | jq \
+  --arg active "$HARNESS_LABEL_ACTIVE" \
+  --arg pr_open "$HARNESS_LABEL_PR_OPEN" \
+  --arg done "$HARNESS_LABEL_DONE" \
+  --arg blocked "$HARNESS_LABEL_BLOCKED" \
+  --arg label_filter "$label_filter" \
+  --argjson claimed "$claimed" '
+    map(
+      select(.pull_request | not)
+      | .number as $issue_number
+      | .labels = (.labels // [])
+      | select(([.labels[].name] | index($active)) | not)
+      | select(([.labels[].name] | index($pr_open)) | not)
+      | select(([.labels[].name] | index($done)) | not)
+      | select(([.labels[].name] | index($blocked)) | not)
+      | select(($claimed | index($issue_number)) | not)
+      | select(
+          if ($label_filter | length) == 0
+          then true
+          else ([.labels[].name] | index($label_filter)) != null
+          end
+        )
+    )
+    | .[0] // empty
+  ')
+
+if [[ -z "$selected" ]]; then
+  harness_die "no eligible issue found"
+fi
+
+if [[ "$json_mode" -eq 1 ]]; then
+  printf '%s\n' "$selected"
+  exit 0
+fi
+
+printf '#%s %s\n' \
+  "$(printf '%s' "$selected" | jq -r '.number')" \
+  "$(printf '%s' "$selected" | jq -r '.title')"
+printf '%s\n' "$(printf '%s' "$selected" | jq -r '.html_url')"

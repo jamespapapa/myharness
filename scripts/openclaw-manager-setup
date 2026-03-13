@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=./harness-lib.sh
+source "$SCRIPT_DIR/harness-lib.sh"
+
+harness_load_project_env
+repo_root=$(harness_repo_root)
+
+mkdir -p "$HARNESS_MANAGER_DIR"
+cp "$repo_root/.harness/profiles/openclaw-manager/AGENTS.md" "$HARNESS_MANAGER_DIR/AGENTS.md"
+
+cat >"$HARNESS_MANAGER_DIR/START.md" <<EOF
+# OpenClaw Manager Workspace
+
+Run OpenClaw from this directory:
+
+\`\`\`bash
+cd "$HARNESS_MANAGER_DIR"
+openclaw
+\`\`\`
+
+Primary commands:
+
+- create issue: \`../../scripts/task-intake --title "<title>" --body "<body>"\`
+- create and start: \`../../scripts/task-intake --title "<title>" --body "<body>" --start\`
+- next issue: \`../../scripts/task-next\`
+- autonomous worker tick: \`../../scripts/task-run-once\`
+- review lane tick: \`../../scripts/task-review-once\`
+- prepare lane tick: \`../../scripts/task-prepare-once\`
+- land lane tick: \`../../scripts/task-land-once\`
+- start next issue: \`../../scripts/task-start --next\`
+- start explicit issue: \`../../scripts/task-start --issue <n>\`
+- mark PR open: \`../../scripts/task-finish --issue <n> --pr <url>\`
+- mark blocked: \`../../scripts/task-finish --issue <n> --blocked "<reason>"\`
+- mark merged: \`../../scripts/task-finish --issue <n> --merged --pr <url>\`
+
+Manual:
+
+- \`../../ops/HARNESS_ADMIN.md\`
+- \`../../ops/AUTONOMOUS_SWARM.md\`
+EOF
+
+printf 'manager workspace ready: %s\n' "$HARNESS_MANAGER_DIR"
+printf 'launch with:\n'
+printf '  cd %q && openclaw\n' "$HARNESS_MANAGER_DIR"
