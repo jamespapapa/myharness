@@ -38,6 +38,9 @@ done
 
 harness_can_sync_github || harness_die "GitHub sync is unavailable; check gh auth and repo remote."
 harness_load_project_env
+if [[ -z "$label_filter" ]]; then
+  label_filter="$HARNESS_AUTONOMOUS_LABEL"
+fi
 repo=$(harness_repo_slug)
 claimed=$(harness_claimed_issue_numbers_json "$repo")
 

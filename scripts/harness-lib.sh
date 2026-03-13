@@ -568,7 +568,7 @@ harness_pr_number_from_url() {
 harness_fetch_pr_json() {
   local pr_ref
   pr_ref="$1"
-  gh pr view "$pr_ref" --json number,title,url,state,isDraft,baseRefName,headRefName,headRefOid,statusCheckRollup,files,mergeStateStatus
+  gh pr view "$pr_ref" --json number,title,url,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,statusCheckRollup,files,mergeStateStatus
 }
 
 harness_task_pr_json() {
@@ -587,10 +587,20 @@ harness_issue_files_docs_only_from_pr_json() {
     | length > 0
     and all(
       .[];
-      test("(^|/)(README|CHANGELOG|AGENTS)\\.md$")
-      or test("\\.md$")
-      or test("^ops/")
-      or test("^\\.omx/plans/")
+      (
+        test("^\\.harness/")
+        or test("^\\.harness-manager/")
+        or test("(^|/)AGENTS\\.md$")
+        or test("(^|/)CLAUDE\\.md$")
+      )
+      | not
+      and (
+        test("(^|/)(README|CHANGELOG)\\.md$")
+        or test("\\.md$")
+        or test("^ops/")
+        or test("^\\.omx/plans/")
+        or test("^artifacts/")
+      )
     )
   ' >/dev/null 2>&1
 }
@@ -794,16 +804,21 @@ harness_issue_unclaim() {
   harness_issue_comment "$repo" "$issue_number" "Harness claim cleared."
 }
 
+harness_remote_branch_ref() {
+  local base
+  base="${1:-$HARNESS_BASE_BRANCH}"
+  printf 'origin/%s\n' "$base"
+}
+
 harness_ensure_base_branch() {
-  local root base
+  local root base remote_ref
   root=$(harness_repo_root)
   base="${1:-$HARNESS_BASE_BRANCH}"
+  remote_ref="refs/remotes/origin/$base"
 
-  if git -C "$root" show-ref --verify --quiet "refs/heads/$base"; then
-    return 0
-  fi
-
-  git -C "$root" fetch origin "$base:$base" >/dev/null
+  git -C "$root" fetch origin "$base" >/dev/null
+  git -C "$root" show-ref --verify --quiet "$remote_ref" \
+    || harness_die "remote base branch not found after fetch: origin/$base"
 }
 
 harness_fetch_issue_json() {

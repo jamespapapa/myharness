@@ -9,8 +9,10 @@ cd "$root"
 scripts=(
   scripts/harness-lib.sh
   scripts/check-harness
+  scripts/check-task-control-room-once
   scripts/check-task-run-once
   scripts/openclaw-manager-setup
+  scripts/task-control-room-once
   scripts/task-create
   scripts/task-finish
   scripts/task-intake
@@ -26,5 +28,6 @@ scripts=(
 )
 
 bash -n "${scripts[@]}"
+scripts/check-task-control-room-once
 scripts/check-task-run-once
 printf 'check-harness passed\n'

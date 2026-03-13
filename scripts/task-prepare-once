@@ -35,41 +35,50 @@ emit_log() {
 
 next_task=$(harness_find_next_task_by_status "reviewed" || true)
 if [[ -z "$next_task" ]]; then
-  emit_log "idle" "" "no reviewed task found"
-  printf 'idle: no reviewed task found\n'
+  detail="prepare lane idle; no reviewed task found"
+  emit_log "idle" "" "$detail"
+  printf 'idle: %s\n' "$detail"
   exit 0
 fi
 
 task_id=$(printf '%s' "$next_task" | jq -r '.task_id')
 
 if ! output=$("$SCRIPT_DIR/task-prepare" --task-id "$task_id" 2>&1); then
-  if printf '%s' "$output" | rg -q "claimed by another prepare worker"; then
-    emit_log "waiting" "$task_id" "$output"
-    printf '%s\n' "$output"
+  if [[ "$output" == *"claimed by another prepare worker"* ]]; then
+    detail="prepare lane waiting on $task_id; $output"
+    emit_log "waiting" "$task_id" "$detail"
+    printf 'waiting: %s\n' "$detail"
     exit 0
   fi
   status=$(harness_task_field "$task_id" '.status // ""' 2>/dev/null || true)
   if [[ "$status" == "prepare_failed" || "$status" == "blocked" ]]; then
-    emit_log "blocked" "$task_id" "$output"
-    printf '%s\n' "$output"
+    detail="prepare lane blocked $task_id; $output"
+    emit_log "blocked" "$task_id" "$detail"
+    printf 'blocked: %s\n' "$detail"
     exit 2
   fi
-  emit_log "error" "$task_id" "$output"
-  printf '%s\n' "$output" >&2
+  detail="prepare lane error on $task_id; $output"
+  emit_log "error" "$task_id" "$detail"
+  printf 'error: %s\n' "$detail" >&2
   exit 1
 fi
 
 status=$(harness_task_field "$task_id" '.status // ""')
 case "$status" in
   prepared)
-    emit_log "success" "$task_id" "$output"
+    detail="prepare lane passed $task_id"
+    emit_log "success" "$task_id" "$detail"
+    printf 'success: %s\n' "$detail"
     ;;
   pr_open)
-    emit_log "waiting" "$task_id" "$output"
+    detail="prepare lane left $task_id in pr_open; $output"
+    emit_log "waiting" "$task_id" "$detail"
+    printf 'waiting: %s\n' "$detail"
     ;;
   *)
-    emit_log "error" "$task_id" "$output"
+    detail="prepare lane ended with unexpected status=$status for $task_id; $output"
+    emit_log "error" "$task_id" "$detail"
+    printf 'error: %s\n' "$detail" >&2
+    exit 1
     ;;
 esac
-
-printf '%s\n' "$output"

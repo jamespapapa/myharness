@@ -79,6 +79,8 @@ if [[ -z "$base_branch" ]]; then
 fi
 
 harness_ensure_base_branch "$base_branch"
+base_remote_ref=$(harness_remote_branch_ref "$base_branch")
+base_sha=$(git -C "$repo_root" rev-parse "$base_remote_ref")
 
 if [[ -n "$issue_number" ]]; then
   branch="${HARNESS_BRANCH_PREFIX}${issue_number}"
@@ -98,7 +100,7 @@ if [[ ! -e "$worktree" ]]; then
   if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
     git -C "$repo_root" worktree add "$worktree" "$branch" >/dev/null
   else
-    git -C "$repo_root" worktree add -b "$branch" "$worktree" "$base_branch" >/dev/null
+    git -C "$repo_root" worktree add -b "$branch" "$worktree" "$base_remote_ref" >/dev/null
   fi
 fi
 
@@ -115,6 +117,8 @@ cat >"$task_dir/task.json" <<EOF
   "repo_slug": $(printf '%s' "$repo_slug" | jq -Rs .),
   "branch": $(printf '%s' "$branch" | jq -Rs .),
   "base_branch": $(printf '%s' "$base_branch" | jq -Rs .),
+  "base_remote_ref": $(printf '%s' "$base_remote_ref" | jq -Rs .),
+  "base_sha": $(printf '%s' "$base_sha" | jq -Rs .),
   "worktree": $(printf '%s' "$worktree" | jq -Rs .),
   "status": "created",
   "created_at": "$(harness_now_utc)"

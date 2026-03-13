@@ -17,7 +17,9 @@ The human manager should spend time deciding scope and priority, not hand-carryi
 
 - The full four-lane path has been exercised against a live GitHub issue in this repo.
 - Validated outcome: `issue -> PR -> review artifact -> prepare artifact -> merge`.
-- `task-land` now performs the merge when review and prepare artifacts match the current PR head.
+- `task-land` now performs the merge when review and prepare artifacts match the current PR head and base.
+- Queue selection is currently oldest eligible issue first, gated by the `Ready` label by default and overrideable with `--label`.
+- `task-control-room-once` now advances `land -> prepare -> review -> executor` from one repo-level wake loop.
 - The current validation depth is one docs-only issue. For a real codebase, you still need project-specific gates and required-check policy.
 - Issue intake quality is still a policy and script convention here, not a GitHub-enforced issue form.
 
@@ -52,7 +54,7 @@ Before you trust autonomous merge on a real repository:
 
 1. Update [.harness/prepare.commands](/Users/jules/Desktop/work/myharness/.harness/prepare.commands) with the repo's real `lint`, `test`, `build`, and invariant commands.
 2. Set `HARNESS_REQUIRE_GREEN_CHECKS="1"` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) if GitHub checks must be green before merge.
-3. Set `HARNESS_REPO_SLUG`, `HARNESS_BASE_BRANCH`, and any label filter you actually want to run.
+3. Confirm the queue gate you want in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) (current default: `HARNESS_AUTONOMOUS_LABEL="Ready"`).
 4. Add GitHub issue forms, or require all intake to flow through `scripts/task-intake`.
 5. Decide how many executor workers you want, then add the corresponding cron jobs.
 
@@ -132,8 +134,9 @@ This seed repo does not yet enforce that contract through `.github/ISSUE_TEMPLAT
 ### 2. Pick the next issue
 
 ```bash
-scripts/task-next
+scripts/task-next          # default queue: oldest eligible issue with label `Ready`
 scripts/task-next --label bug
+scripts/task-next --label Ready
 ```
 
 ### 3. Claim and create a task workspace
@@ -208,10 +211,19 @@ Claims are also tracked locally in `.harness/state/claims.json`. `task-next` pru
 If you want “register GitHub issues and let workers consume them”, use:
 
 ```bash
-scripts/task-run-once
+scripts/task-control-room-once
 ```
 
-That one command performs one worker tick:
+That one command performs one repo wake tick:
+
+- advance `prepared` work through land first,
+- otherwise advance `reviewed` work through prepare,
+- otherwise advance `pr_open` work through review,
+- otherwise run executor reconcile/claim logic,
+- log one JSONL result line,
+- exit.
+
+The executor portion still behaves like this when reached:
 
 - reconcile one stale `in_progress` executor task first when needed,
 - pick one eligible issue,
@@ -222,19 +234,20 @@ That one command performs one worker tick:
 - log one JSONL result line,
 - exit.
 
-Expected `task-run-once` outcomes:
+Expected control-room outcomes:
 
-- `idle`: Ready queue empty and no unresolved active executor work
-- `waiting`: Ready queue empty but executor work is still running/reconciling, or the active executor limit is already full
-- `success`: claimed a new issue or reconciled an older executor run into `pr_open`/`done`
-- `blocked`: task reconciled to `blocked`
-- `error`: the worker could not record a terminal or next-lane state
+- `idle`: `Ready` queue empty and no unresolved work in land/prepare/review/executor lanes
+- `waiting`: active work still needs another wake, or executor capacity is intentionally full
+- `success`: one lane advanced work toward merge or completion
+- `blocked`: one lane reconciled a task to `blocked`
+- `error`: the worker could not record a valid next state
 
 See [ops/AUTONOMOUS_SWARM.md](/Users/jules/Desktop/work/myharness/ops/AUTONOMOUS_SWARM.md) for the cron-swarm model.
 
-For the full four-lane pipeline, add:
+Manual lane entrypoints remain available:
 
 ```bash
+scripts/task-run-once
 scripts/task-review-once
 scripts/task-prepare-once
 scripts/task-land-once
@@ -246,15 +259,8 @@ Those lanes consume local task states in order:
 - `reviewed` -> prepare
 - `prepared` -> land
 
-For real unattended operation, the normal topology is:
-
-- `N` executor workers running `scripts/task-run-once`
-- `1` review worker running `scripts/task-review-once`
-- `1` prepare worker running `scripts/task-prepare-once`
-- `1` land worker running `scripts/task-land-once`
-
-If the queue backs up, increase executor workers first.
-Keep `HARNESS_EXECUTOR_ACTIVE_LIMIT="1"` unless you intentionally want concurrent active executor tasks.
+For real unattended operation, the normal topology is one repo channel or cron wake loop running `scripts/task-control-room-once`.
+If backlog grows, add more identical repo-level wakes only intentionally, and keep `HARNESS_EXECUTOR_ACTIVE_LIMIT="1"` unless you want concurrent active executor tasks.
 
 ## Paired AGENTS Model
 

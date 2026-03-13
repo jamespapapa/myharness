@@ -84,6 +84,7 @@ pr_number=$(printf '%s' "$pr_json" | jq -r '.number')
 pr_state=$(printf '%s' "$pr_json" | jq -r '.state')
 is_draft=$(printf '%s' "$pr_json" | jq -r '.isDraft')
 base_ref=$(printf '%s' "$pr_json" | jq -r '.baseRefName')
+base_sha=$(printf '%s' "$pr_json" | jq -r '.baseRefOid')
 head_ref=$(printf '%s' "$pr_json" | jq -r '.headRefName')
 head_sha=$(printf '%s' "$pr_json" | jq -r '.headRefOid')
 
@@ -102,7 +103,8 @@ review_session="$artifact_dir/session"
 mkdir -p "$review_session"
 diff_patch="$review_session/DIFF.patch"
 cp "$(harness_repo_root)/.harness/profiles/codex-review/AGENTS.md" "$review_session/AGENTS.md"
-git -C "$worktree" diff --unified=40 "$base_ref...$head_sha" >"$diff_patch"
+harness_ensure_base_branch "$base_ref"
+git -C "$worktree" diff --unified=40 "$base_sha...$head_sha" >"$diff_patch"
 
 cat >"$review_session/REVIEW_TASK.md" <<EOF
 # Review Task
@@ -113,6 +115,7 @@ cat >"$review_session/REVIEW_TASK.md" <<EOF
 - pr_url: $pr_url
 - worktree: \`$worktree\`
 - base_ref: \`$base_ref\`
+- base_sha: \`$base_sha\`
 - head_ref: \`$head_ref\`
 - head_sha: \`$head_sha\`
 - artifact_markdown: \`$review_md\`
@@ -121,7 +124,7 @@ cat >"$review_session/REVIEW_TASK.md" <<EOF
 
 ## Mission
 
-Review the current PR head against \`$base_ref\` with a code review mindset.
+Review the current PR head against base commit \`$base_sha\` on \`$base_ref\` with a code review mindset.
 
 Primary inputs for this review:
 
@@ -158,6 +161,7 @@ Write \`$review_json\` with this exact schema:
   "issue_number": ${issue_number:-null},
   "pr_number": $pr_number,
   "pr_url": "$pr_url",
+  "reviewed_base_sha": "$base_sha",
   "reviewed_head_sha": "$head_sha",
   "reviewed_at": "ISO-8601 UTC timestamp",
   "verdict": "approved or rejected",
@@ -207,16 +211,18 @@ fi
 [[ -s "$review_json" ]] || harness_die "missing review json: $review_json"
 
 verdict=$(jq -r '.verdict' "$review_json")
+reviewed_base_sha=$(jq -r '.reviewed_base_sha' "$review_json")
 reviewed_head_sha=$(jq -r '.reviewed_head_sha' "$review_json")
 summary=$(jq -r '.summary // ""' "$review_json")
 
 current_pr_json=$(harness_fetch_pr_json "$pr_url")
+current_base_sha=$(printf '%s' "$current_pr_json" | jq -r '.baseRefOid')
 current_head_sha=$(printf '%s' "$current_pr_json" | jq -r '.headRefOid')
 
-if [[ "$reviewed_head_sha" != "$head_sha" || "$current_head_sha" != "$head_sha" ]]; then
-  harness_update_task_status "$task_id" "pr_open" "review artifact stale; PR head moved during review" "$pr_url"
+if [[ "$reviewed_base_sha" != "$base_sha" || "$reviewed_head_sha" != "$head_sha" || "$current_base_sha" != "$base_sha" || "$current_head_sha" != "$head_sha" ]]; then
+  harness_update_task_status "$task_id" "pr_open" "review artifact stale; PR head or base moved during review" "$pr_url"
   if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
-    harness_issue_comment "$repo_slug" "$issue_number" "Harness note: review artifact became stale because the PR head changed during review."
+    harness_issue_comment "$repo_slug" "$issue_number" "Harness note: review artifact became stale because the PR head or base changed during review."
   fi
   printf 'review stale: %s\n' "$task_id"
   exit 0

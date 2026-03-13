@@ -235,7 +235,7 @@ collect_changed_files() {
 
 reconcile_task() {
   local task_json="$1"
-  local issue_number task_id title worktree branch base_branch repo_slug claim_key worker_log
+  local issue_number task_id title worktree branch base_branch base_remote_ref base_sha repo_slug claim_key worker_log
   local task_json_path status pr_url note ahead_count recovery_reason
   local -a changed_files
 
@@ -245,6 +245,8 @@ reconcile_task() {
   worktree=$(printf '%s' "$task_json" | jq -r '.worktree')
   branch=$(printf '%s' "$task_json" | jq -r '.branch')
   base_branch=$(printf '%s' "$task_json" | jq -r '.base_branch')
+  base_remote_ref=$(printf '%s' "$task_json" | jq -r '.base_remote_ref // ""')
+  base_sha=$(printf '%s' "$task_json" | jq -r '.base_sha // ""')
   repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
   claim_key=$(printf '%s' "$task_json" | jq -r '.claim_key // ""')
   worker_log=$(printf '%s' "$task_json" | jq -r '.worker_log // ""')
@@ -278,7 +280,13 @@ reconcile_task() {
           git -C "$worktree" commit -m "fix: address issue #$issue_number" >/dev/null 2>&1 || true
         fi
 
-        ahead_count=$(git -C "$worktree" rev-list --count "${base_branch}..HEAD" 2>/dev/null || echo 0)
+        if [[ -n "$base_remote_ref" ]]; then
+          ahead_count=$(git -C "$worktree" rev-list --count "${base_remote_ref}..HEAD" 2>/dev/null || echo 0)
+        elif [[ -n "$base_sha" ]]; then
+          ahead_count=$(git -C "$worktree" rev-list --count "${base_sha}..HEAD" 2>/dev/null || echo 0)
+        else
+          ahead_count=$(git -C "$worktree" rev-list --count "${base_branch}..HEAD" 2>/dev/null || echo 0)
+        fi
         if [[ "${ahead_count:-0}" -gt 0 ]]; then
           if git -C "$worktree" push -u origin "$branch" >/dev/null 2>&1; then
             if [[ -z "$pr_url" ]]; then
@@ -362,7 +370,7 @@ if reconcilable_task=$(find_reconcilable_active_task "$active_tasks" 2>/dev/null
 fi
 
 if ! next_output=$(next_issue_json 2>&1); then
-  if printf '%s' "$next_output" | rg -q "no eligible issue found"; then
+  if [[ "$next_output" == *"no eligible issue found"* ]]; then
     if [[ "$active_total" -gt 0 ]]; then
       waiting_detail="ready queue empty; active work still running/reconciling; $active_summary_text"
       emit_log "waiting" "ready queue empty but active work remains" "" "" "$waiting_detail"
@@ -370,8 +378,9 @@ if ! next_output=$(next_issue_json 2>&1); then
       exit 0
     fi
 
-    emit_log "idle" "no eligible issue found" "" "" "ready queue empty; no active work"
-    printf 'idle: no eligible issue found\n'
+    idle_detail="ready queue empty; no active executor work"
+    emit_log "idle" "ready queue empty; no active executor work" "" "" "$idle_detail"
+    printf 'idle: %s\n' "$idle_detail"
     exit 0
   fi
 

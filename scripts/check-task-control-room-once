@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SOURCE_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
+
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+setup_fixture() {
+  local name="$1"
+
+  FIXTURE_DIR="$TMP_DIR/$name"
+  REPO_DIR="$FIXTURE_DIR/repo"
+
+  mkdir -p "$FIXTURE_DIR"
+  rsync -a \
+    --exclude '.git' \
+    --exclude '.harness/state' \
+    --exclude '.harness/tasks' \
+    --exclude '.harness/logs' \
+    --exclude '.harness-manager' \
+    --exclude '.harness-session' \
+    "$SOURCE_ROOT/" "$REPO_DIR/"
+
+  git -C "$REPO_DIR" init -q -b main
+  git -C "$REPO_DIR" config user.name "Harness Test"
+  git -C "$REPO_DIR" config user.email "harness-test@example.com"
+  git -C "$REPO_DIR" add .
+  git -C "$REPO_DIR" commit -qm "fixture"
+  mkdir -p "$REPO_DIR/.harness/logs"
+  : >"$REPO_DIR/CALLS.log"
+}
+
+write_stub() {
+  local name="$1"
+  local output="$2"
+  local exit_code="$3"
+  local quoted_output
+
+  quoted_output=$(printf '%q' "$output")
+
+  cat >"$REPO_DIR/scripts/$name" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' '$name' >>'$REPO_DIR/CALLS.log'
+printf '%s\n' $quoted_output
+exit $exit_code
+EOF
+  chmod +x "$REPO_DIR/scripts/$name"
+}
+
+assert_eq() {
+  local actual="$1"
+  local expected="$2"
+  local message="$3"
+
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'assert_eq failed: %s\nexpected: %s\nactual:   %s\n' "$message" "$expected" "$actual" >&2
+    exit 1
+  fi
+}
+
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local message="$3"
+
+  if [[ "$haystack" != *"$needle"* ]]; then
+    printf 'assert_contains failed: %s\nneedle: %s\nhaystack: %s\n' "$message" "$needle" "$haystack" >&2
+    exit 1
+  fi
+}
+
+scenario_stops_on_land_lane() {
+  local output calls log_line
+
+  setup_fixture "land-priority"
+  write_stub task-land-once "success: land lane merged issue-11" 0
+  write_stub task-prepare-once "idle: prepare lane idle; no reviewed task found" 0
+  write_stub task-review-once "idle: review lane idle; no pr_open task found" 0
+  write_stub task-run-once "success: reconciled issue #11 -> PR https://example.test/pr/11" 0
+
+  output=$("$REPO_DIR/scripts/task-control-room-once")
+  assert_eq "$output" "success: land lane merged issue-11" "control room should stop at the first active higher-priority lane"
+
+  calls=$(cat "$REPO_DIR/CALLS.log")
+  assert_eq "$calls" "task-land-once" "control room should not fall through after land succeeds"
+
+  log_line=$(tail -n 1 "$REPO_DIR/.harness/logs/task-control-room-once.jsonl")
+  assert_contains "$log_line" '"lane":"land"' "log should record the selected lane"
+  assert_contains "$log_line" '"status":"success"' "log should record success status"
+}
+
+scenario_stops_on_review_before_executor() {
+  local output calls
+
+  setup_fixture "review-priority"
+  write_stub task-land-once "idle: land lane idle; no prepared task found" 0
+  write_stub task-prepare-once "idle: prepare lane idle; no reviewed task found" 0
+  write_stub task-review-once "success: review lane approved issue-22" 0
+  write_stub task-run-once "success: reconciled issue #22 -> PR https://example.test/pr/22" 0
+
+  output=$("$REPO_DIR/scripts/task-control-room-once")
+  assert_eq "$output" "success: review lane approved issue-22" "review lane should run before executor claims more work"
+
+  calls=$(cat "$REPO_DIR/CALLS.log")
+  assert_eq "$calls" $'task-land-once\ntask-prepare-once\ntask-review-once' "control room should stop once review advances work"
+}
+
+scenario_falls_through_to_executor_waiting() {
+  local output calls log_line
+
+  setup_fixture "executor-waiting"
+  write_stub task-land-once "idle: land lane idle; no prepared task found" 0
+  write_stub task-prepare-once "idle: prepare lane idle; no reviewed task found" 0
+  write_stub task-review-once "idle: review lane idle; no pr_open task found" 0
+  write_stub task-run-once "waiting: ready queue empty; active work still running/reconciling; running=1 reconciling=0 total=1 limit=1" 0
+
+  output=$("$REPO_DIR/scripts/task-control-room-once")
+  assert_eq "$output" "waiting: ready queue empty; active work still running/reconciling; running=1 reconciling=0 total=1 limit=1" "executor waiting output should surface at repo level"
+
+  calls=$(cat "$REPO_DIR/CALLS.log")
+  assert_eq "$calls" $'task-land-once\ntask-prepare-once\ntask-review-once\ntask-run-once' "control room should check lanes in priority order before executor"
+
+  log_line=$(tail -n 1 "$REPO_DIR/.harness/logs/task-control-room-once.jsonl")
+  assert_contains "$log_line" '"lane":"executor"' "executor fallback should be logged"
+  assert_contains "$log_line" '"status":"waiting"' "executor waiting should stay distinguishable from idle"
+}
+
+scenario_stops_on_land_lane
+scenario_stops_on_review_before_executor
+scenario_falls_through_to_executor_waiting
+
+printf 'check-task-control-room-once passed\n'
