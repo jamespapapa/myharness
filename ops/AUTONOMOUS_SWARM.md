@@ -65,6 +65,12 @@ Each worker tick must do exactly one of:
 
 It must leave a JSONL line in `.harness/logs/task-run-once.jsonl` and then stop.
 
+Operator-facing idle stdout is canonical across the control-room flow:
+
+- `checked: no work (Ready queue empty)`
+
+Lane-specific idle reasons stay in the JSONL `detail` field for parsing and debugging.
+
 ## Local Cron Example
 
 One worker every 5 minutes:

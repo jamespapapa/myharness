@@ -36,7 +36,7 @@ emit_log() {
 next_task=$(harness_find_next_task_by_status "pr_open" || true)
 if [[ -z "$next_task" ]]; then
   emit_log "idle" "" "no pr_open task found"
-  printf 'idle: no pr_open task found\n'
+  harness_control_room_idle_line
   exit 0
 fi
 

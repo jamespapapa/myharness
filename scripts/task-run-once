@@ -79,9 +79,9 @@ if [[ -n "$label_filter" ]]; then
 fi
 
 if ! next_output=$("$SCRIPT_DIR/task-next" "${next_args[@]}" 2>&1); then
-  if printf '%s' "$next_output" | rg -q "no eligible issue found"; then
+  if printf '%s' "$next_output" | grep -q "no eligible issue found"; then
     emit_log "idle" "no eligible issue found"
-    printf 'idle: no eligible issue found\n'
+    harness_control_room_idle_line
     exit 0
   fi
 
