@@ -107,23 +107,32 @@ Every cron worker tick should do exactly one of these outcomes:
 
 1. `idle`
    - no eligible issue
+   - no unresolved active executor work
    - write one log line
    - exit 0
-2. `success`
+2. `waiting`
+   - ready queue is empty but active executor work is still running or reconciling
+   - or the active executor limit is already reached
+   - do not claim more work
+   - write one log line
+   - exit 0
+3. `success`
    - claimed one issue
-   - executor left terminal state such as `pr_open` or `done`
+   - or reconciled one active issue to `pr_open`, `done`, or another explicit next state
    - write one result line
    - exit 0
-3. `blocked`
+4. `blocked`
    - claimed issue but task blocked
    - record blocker to GitHub and log
    - exit non-zero
-4. `error`
+5. `error`
    - failed to claim, materialize, or record a terminal state
    - mark blocked or escalate
    - exit non-zero
 
 Each worker must be disposable. No long-lived in-memory state is trusted.
+Before a worker claims new Ready work, it must reconcile stale `in_progress` executor work first.
+The safe default is an active executor limit of `1`, so the control-room path stays serialized unless the operator raises that limit explicitly.
 
 ## Cron Topology
 

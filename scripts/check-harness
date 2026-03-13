@@ -3,16 +3,13 @@
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-if common_git_dir=$(git -C "$script_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
-  root=$(dirname "$common_git_dir")
-else
-  root=$(git -C "$script_dir" rev-parse --show-toplevel)
-fi
+root=$(git -C "$script_dir" rev-parse --show-toplevel)
 cd "$root"
 
 scripts=(
   scripts/harness-lib.sh
   scripts/check-harness
+  scripts/check-task-run-once
   scripts/openclaw-manager-setup
   scripts/task-create
   scripts/task-finish
@@ -29,4 +26,5 @@ scripts=(
 )
 
 bash -n "${scripts[@]}"
+scripts/check-task-run-once
 printf 'check-harness passed\n'

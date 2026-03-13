@@ -33,6 +33,7 @@ Validation reference:
 Implemented now:
 
 - issue selection
+- active executor limit with reconcile-before-claim dispatch
 - claim + worktree materialization
 - Codex executor launch
 - one-line result logging
@@ -59,11 +60,14 @@ Planned next:
 Each worker tick must do exactly one of:
 
 1. `idle`
-2. `success`
-3. `blocked`
-4. `error`
+2. `waiting`
+3. `success`
+4. `blocked`
+5. `error`
 
 It must leave a JSONL line in `.harness/logs/task-run-once.jsonl` and then stop.
+`idle` means the Ready queue is empty and there is no unresolved active executor work.
+`waiting` means the Ready queue is empty but active work is still running/reconciling, or the active executor limit is already full.
 
 ## Local Cron Example
 
@@ -82,6 +86,7 @@ Three workers:
 ```
 
 The claim lock and GitHub state sync prevent the same issue from being taken twice.
+The safe default is `HARNESS_EXECUTOR_ACTIVE_LIMIT="1"`, so one-shot executor dispatch stays serialized unless the operator raises that limit intentionally.
 
 ## Four-Lane Cron Shape
 
@@ -132,8 +137,9 @@ If you need more throughput, add more identical jobs with different names.
 1. Write a good GitHub issue using the harness intake format.
 2. Do not manually dispatch it.
 3. Wait for a worker tick to claim it.
-4. If the task blocks, inspect the GitHub comment and the JSONL log.
-5. If backlog exceeds worker throughput, add more worker cron jobs.
+4. If stdout or JSONL says `waiting`, inspect whether the Ready queue is empty or an older executor task is still running/reconciling.
+5. If the task blocks, inspect the GitHub comment and the JSONL log.
+6. If backlog exceeds worker throughput, add more worker cron jobs, then raise `HARNESS_EXECUTOR_ACTIVE_LIMIT` only if you intentionally want more than one active executor task.
 
 ## Intake Contract
 
@@ -179,6 +185,7 @@ For a real codebase, safe unattended merge still depends on:
 One-shot lanes are now bounded by default so cron workers do not hang indefinitely:
 
 - `HARNESS_EXECUTOR_TIMEOUT_SECONDS`
+- `HARNESS_EXECUTOR_ACTIVE_LIMIT`
 - `HARNESS_REVIEW_TIMEOUT_SECONDS`
 - `HARNESS_PREPARE_TIMEOUT_SECONDS`
 - `HARNESS_LAND_TIMEOUT_SECONDS`

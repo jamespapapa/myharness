@@ -54,6 +54,7 @@ harness_load_project_env() {
   : "${HARNESS_AUTONOMOUS_LABEL:=}"
   : "${HARNESS_CRON_INTERVAL_MINUTES:=5}"
   : "${HARNESS_EXECUTOR_TIMEOUT_SECONDS:=240}"
+  : "${HARNESS_EXECUTOR_ACTIVE_LIMIT:=1}"
   : "${HARNESS_REVIEW_TIMEOUT_SECONDS:=180}"
   : "${HARNESS_PREPARE_TIMEOUT_SECONDS:=300}"
   : "${HARNESS_LAND_TIMEOUT_SECONDS:=120}"
@@ -277,6 +278,13 @@ harness_claimed_issue_numbers_json() {
   ' "$HARNESS_CLAIMS_FILE"
 }
 
+harness_claim_json() {
+  local key
+  key="$1"
+  harness_prune_claims
+  jq -c --arg key "$key" '.[$key] // empty' "$HARNESS_CLAIMS_FILE"
+}
+
 harness_write_claim() {
   local key repo issue_number task_id branch worktree agent status now epoch had_lock
   key="$1"
@@ -317,6 +325,48 @@ harness_write_claim() {
         claimed_at: $claimed_at,
         claimed_epoch: $claimed_epoch
       }
+    ' "$HARNESS_CLAIMS_FILE" >"$HARNESS_CLAIMS_FILE.tmp"
+  mv "$HARNESS_CLAIMS_FILE.tmp" "$HARNESS_CLAIMS_FILE"
+  if [[ "$had_lock" != "1" ]]; then
+    harness_release_lock
+  fi
+}
+
+harness_update_claim_status() {
+  local key status note worker_log worker_exit now epoch had_lock
+  key="$1"
+  status="$2"
+  note="${3:-}"
+  worker_log="${4:-}"
+  worker_exit="${5:-}"
+
+  harness_load_project_env
+  harness_prepare_state
+  had_lock="${HARNESS_LOCK_HELD:-0}"
+  harness_acquire_lock
+  now=$(harness_now_utc)
+  epoch=$(date -u +%s)
+
+  jq \
+    --arg key "$key" \
+    --arg status "$status" \
+    --arg note "$note" \
+    --arg worker_log "$worker_log" \
+    --arg worker_exit "$worker_exit" \
+    --arg updated_at "$now" \
+    --argjson updated_epoch "$epoch" '
+      if has($key) then
+        .[$key] |= (
+          .status = $status
+          | .updated_at = $updated_at
+          | .updated_epoch = $updated_epoch
+          | if ($note | length) > 0 then .note = $note else . end
+          | if ($worker_log | length) > 0 then .worker_log = $worker_log else . end
+          | if ($worker_exit | length) > 0 then .worker_exit = $worker_exit else . end
+        )
+      else
+        .
+      end
     ' "$HARNESS_CLAIMS_FILE" >"$HARNESS_CLAIMS_FILE.tmp"
   mv "$HARNESS_CLAIMS_FILE.tmp" "$HARNESS_CLAIMS_FILE"
   if [[ "$had_lock" != "1" ]]; then

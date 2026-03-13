@@ -213,13 +213,22 @@ scripts/task-run-once
 
 That one command performs one worker tick:
 
+- reconcile one stale `in_progress` executor task first when needed,
 - pick one eligible issue,
-- claim it,
+- only claim it if the active executor limit still has capacity,
 - create the worktree and Codex session,
 - run Codex in full-auto mode,
 - require a terminal harness state,
 - log one JSONL result line,
 - exit.
+
+Expected `task-run-once` outcomes:
+
+- `idle`: Ready queue empty and no unresolved active executor work
+- `waiting`: Ready queue empty but executor work is still running/reconciling, or the active executor limit is already full
+- `success`: claimed a new issue or reconciled an older executor run into `pr_open`/`done`
+- `blocked`: task reconciled to `blocked`
+- `error`: the worker could not record a terminal or next-lane state
 
 See [ops/AUTONOMOUS_SWARM.md](/Users/jules/Desktop/work/myharness/ops/AUTONOMOUS_SWARM.md) for the cron-swarm model.
 
@@ -245,6 +254,7 @@ For real unattended operation, the normal topology is:
 - `1` land worker running `scripts/task-land-once`
 
 If the queue backs up, increase executor workers first.
+Keep `HARNESS_EXECUTOR_ACTIVE_LIMIT="1"` unless you intentionally want concurrent active executor tasks.
 
 ## Paired AGENTS Model
 

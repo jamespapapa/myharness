@@ -7,6 +7,7 @@ Current status:
 - Live-validated on 2026-03-13 against `jamespapapa/myharness#1` and PR `#2`
 - End-to-end path exercised: `issue -> claim -> worktree -> Codex -> PR -> review -> prepare -> land -> merge`
 - Review, prepare, and land now run as bounded one-shot lanes suitable for cron workers
+- Executor one-shot dispatch now stays serialized by default and reconciles stale `in_progress` work before claiming more
 - The validation run's queue record lives under `artifacts/smoke/`
 
 What this repo gives you:
