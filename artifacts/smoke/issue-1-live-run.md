@@ -5,7 +5,8 @@
 - pr: `#2`
 - pr_url: `https://github.com/jamespapapa/myharness/pull/2`
 - branch: `fix/issue-1`
-- recorded_at: `2026-03-13`
+- reviewed_head_sha: `2b3f60a4107c7ed950457ffb25e45b97dd72416c`
+- recorded_at: `2026-03-13T06:50:52Z`
 
 ## What This Records
 
@@ -16,7 +17,7 @@ This artifact records the durable GitHub references for the live issue-backed br
 - claim comment: `https://github.com/jamespapapa/myharness/issues/1#issuecomment-4053043311`
 - PR-open comment: `https://github.com/jamespapapa/myharness/issues/1#issuecomment-4053117552`
 - issue-backed pull request: `https://github.com/jamespapapa/myharness/pull/2`
-- reviewed branch tip for this record: `fix/issue-1`
+- reviewed branch name for this record: `fix/issue-1`
 
 ## Notes
 
