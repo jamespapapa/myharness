@@ -18,7 +18,9 @@ write_land_artifacts() {
   "issue_number": ${issue_number:-null},
   "pr_number": $pr_number,
   "pr_url": "$pr_url",
+  "reviewed_base_sha": "$reviewed_base_sha",
   "reviewed_head_sha": "$reviewed_head_sha",
+  "prepared_base_sha": "$prepared_base_sha",
   "prepared_head_sha": "$prepared_head_sha",
   "merge_sha": $(printf '%s' "$merge_sha" | jq -Rs .),
   "merged_at": "$(harness_now_utc)",
@@ -32,7 +34,9 @@ EOF
 
 - task: \`$task_id\`
 - pr: $pr_url
+- reviewed_base_sha: \`$reviewed_base_sha\`
 - reviewed_head_sha: \`$reviewed_head_sha\`
+- prepared_base_sha: \`$prepared_base_sha\`
 - prepared_head_sha: \`$prepared_head_sha\`
 - merge_sha: \`$merge_sha\`
 - merge_method: \`$HARNESS_MERGE_METHOD\`
@@ -120,8 +124,10 @@ prep_json="$(harness_artifact_dir "prep" "$task_id")/gates.json"
 [[ -f "$prep_json" ]] || harness_die "missing prepare artifact: $prep_json"
 
 review_verdict=$(jq -r '.verdict' "$review_json")
+reviewed_base_sha=$(jq -r '.reviewed_base_sha' "$review_json")
 reviewed_head_sha=$(jq -r '.reviewed_head_sha' "$review_json")
 prepare_status=$(jq -r '.status' "$prep_json")
+prepared_base_sha=$(jq -r '.prepared_base_sha' "$prep_json")
 prepared_head_sha=$(jq -r '.prepared_head_sha' "$prep_json")
 
 [[ "$review_verdict" == "approved" ]] || harness_die "review verdict is not approved for $task_id"
@@ -130,6 +136,7 @@ prepared_head_sha=$(jq -r '.prepared_head_sha' "$prep_json")
 pr_json=$(harness_fetch_pr_json "$pr_url")
 pr_number=$(printf '%s' "$pr_json" | jq -r '.number')
 pr_state=$(printf '%s' "$pr_json" | jq -r '.state')
+current_base_sha=$(printf '%s' "$pr_json" | jq -r '.baseRefOid')
 current_head_sha=$(printf '%s' "$pr_json" | jq -r '.headRefOid')
 
 if [[ "$pr_state" == "MERGED" ]]; then
@@ -147,8 +154,8 @@ fi
 
 [[ "$pr_state" == "OPEN" ]] || harness_die "PR is not open: $pr_url (state=$pr_state)"
 
-if [[ "$current_head_sha" != "$reviewed_head_sha" || "$current_head_sha" != "$prepared_head_sha" ]]; then
-  harness_update_task_status "$task_id" "pr_open" "review/prepare artifacts stale; PR head changed" "$pr_url"
+if [[ "$current_base_sha" != "$reviewed_base_sha" || "$current_base_sha" != "$prepared_base_sha" || "$current_head_sha" != "$reviewed_head_sha" || "$current_head_sha" != "$prepared_head_sha" ]]; then
+  harness_update_task_status "$task_id" "pr_open" "review/prepare artifacts stale; PR head or base changed" "$pr_url"
   if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
     harness_issue_comment "$repo_slug" "$issue_number" "Harness note: land deferred because review/prepare artifacts are stale for PR #$pr_number."
   fi

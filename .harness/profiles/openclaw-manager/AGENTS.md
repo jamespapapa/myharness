@@ -17,8 +17,9 @@
 1. If the work does not exist yet, create it with `../../scripts/task-intake`.
 2. Pick work with `../../scripts/task-next` or `../../scripts/task-start --next`.
 3. Claim and materialize the task with `../../scripts/task-start`.
-4. Hand the generated Codex session directory to a worker, or launch Codex yourself from the suggested command.
-5. When a PR opens or the task blocks, sync status with `../../scripts/task-finish`.
+4. Prefer the repo-level `../../scripts/task-control-room-once` wake loop when you want one channel or cron job to keep advancing active work before claiming more.
+5. Hand the generated Codex session directory to a worker, or launch Codex yourself from the suggested command.
+6. When a PR opens or the task blocks, sync status with `../../scripts/task-finish`.
 6. Keep one active task per worktree and one manager decision at a time.
 
 ## Hard Rules
@@ -33,6 +34,7 @@
 - Create a GitHub issue: `../../scripts/task-intake --title "<title>" --body "<body>"`
 - Create and start immediately: `../../scripts/task-intake --title "<title>" --body "<body>" --start`
 - Next eligible issue: `../../scripts/task-next`
+- Repo control-room cycle: `../../scripts/task-control-room-once`
 - Autonomous one-shot cycle: `../../scripts/task-run-once`
 - Review lane cycle: `../../scripts/task-review-once`
 - Prepare lane cycle: `../../scripts/task-prepare-once`

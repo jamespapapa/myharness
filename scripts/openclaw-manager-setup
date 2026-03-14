@@ -27,6 +27,7 @@ Primary commands:
 - create issue: \`../../scripts/task-intake --title "<title>" --body "<body>"\`
 - create and start: \`../../scripts/task-intake --title "<title>" --body "<body>" --start\`
 - next issue: \`../../scripts/task-next\`
+- repo wake tick: \`../../scripts/task-control-room-once\`
 - autonomous worker tick: \`../../scripts/task-run-once\`
 - review lane tick: \`../../scripts/task-review-once\`
 - prepare lane tick: \`../../scripts/task-prepare-once\`

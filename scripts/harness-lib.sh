@@ -54,6 +54,7 @@ harness_load_project_env() {
   : "${HARNESS_AUTONOMOUS_LABEL:=}"
   : "${HARNESS_CRON_INTERVAL_MINUTES:=5}"
   : "${HARNESS_EXECUTOR_TIMEOUT_SECONDS:=240}"
+  : "${HARNESS_EXECUTOR_ACTIVE_LIMIT:=1}"
   : "${HARNESS_REVIEW_TIMEOUT_SECONDS:=180}"
   : "${HARNESS_PREPARE_TIMEOUT_SECONDS:=300}"
   : "${HARNESS_LAND_TIMEOUT_SECONDS:=120}"
@@ -277,6 +278,13 @@ harness_claimed_issue_numbers_json() {
   ' "$HARNESS_CLAIMS_FILE"
 }
 
+harness_claim_json() {
+  local key
+  key="$1"
+  harness_prune_claims
+  jq -c --arg key "$key" '.[$key] // empty' "$HARNESS_CLAIMS_FILE"
+}
+
 harness_write_claim() {
   local key repo issue_number task_id branch worktree agent status now epoch had_lock
   key="$1"
@@ -317,6 +325,48 @@ harness_write_claim() {
         claimed_at: $claimed_at,
         claimed_epoch: $claimed_epoch
       }
+    ' "$HARNESS_CLAIMS_FILE" >"$HARNESS_CLAIMS_FILE.tmp"
+  mv "$HARNESS_CLAIMS_FILE.tmp" "$HARNESS_CLAIMS_FILE"
+  if [[ "$had_lock" != "1" ]]; then
+    harness_release_lock
+  fi
+}
+
+harness_update_claim_status() {
+  local key status note worker_log worker_exit now epoch had_lock
+  key="$1"
+  status="$2"
+  note="${3:-}"
+  worker_log="${4:-}"
+  worker_exit="${5:-}"
+
+  harness_load_project_env
+  harness_prepare_state
+  had_lock="${HARNESS_LOCK_HELD:-0}"
+  harness_acquire_lock
+  now=$(harness_now_utc)
+  epoch=$(date -u +%s)
+
+  jq \
+    --arg key "$key" \
+    --arg status "$status" \
+    --arg note "$note" \
+    --arg worker_log "$worker_log" \
+    --arg worker_exit "$worker_exit" \
+    --arg updated_at "$now" \
+    --argjson updated_epoch "$epoch" '
+      if has($key) then
+        .[$key] |= (
+          .status = $status
+          | .updated_at = $updated_at
+          | .updated_epoch = $updated_epoch
+          | if ($note | length) > 0 then .note = $note else . end
+          | if ($worker_log | length) > 0 then .worker_log = $worker_log else . end
+          | if ($worker_exit | length) > 0 then .worker_exit = $worker_exit else . end
+        )
+      else
+        .
+      end
     ' "$HARNESS_CLAIMS_FILE" >"$HARNESS_CLAIMS_FILE.tmp"
   mv "$HARNESS_CLAIMS_FILE.tmp" "$HARNESS_CLAIMS_FILE"
   if [[ "$had_lock" != "1" ]]; then
@@ -410,6 +460,25 @@ harness_find_next_task_by_status() {
   fi
 
   printf '%s\n' "$files_json"
+}
+
+harness_count_tasks_by_status() {
+  local status
+  status="$1"
+
+  harness_load_project_env
+  shopt -s nullglob
+  local files=("$HARNESS_TASK_DIR"/*/task.json)
+  shopt -u nullglob
+  if [[ "${#files[@]}" -eq 0 ]]; then
+    printf '0\n'
+    return 0
+  fi
+
+  jq -s --arg status "$status" '
+    map(select(.status == $status))
+    | length
+  ' "${files[@]}"
 }
 
 harness_artifact_dir() {
@@ -518,7 +587,7 @@ harness_pr_number_from_url() {
 harness_fetch_pr_json() {
   local pr_ref
   pr_ref="$1"
-  gh pr view "$pr_ref" --json number,title,url,state,isDraft,baseRefName,headRefName,headRefOid,statusCheckRollup,files,mergeStateStatus
+  gh pr view "$pr_ref" --json number,title,url,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,statusCheckRollup,files,mergeStateStatus
 }
 
 harness_task_pr_json() {
@@ -537,10 +606,20 @@ harness_issue_files_docs_only_from_pr_json() {
     | length > 0
     and all(
       .[];
-      test("(^|/)(README|CHANGELOG|AGENTS)\\.md$")
-      or test("\\.md$")
-      or test("^ops/")
-      or test("^\\.omx/plans/")
+      (
+        test("^\\.harness/")
+        or test("^\\.harness-manager/")
+        or test("(^|/)AGENTS\\.md$")
+        or test("(^|/)CLAUDE\\.md$")
+      )
+      | not
+      and (
+        test("(^|/)(README|CHANGELOG)\\.md$")
+        or test("\\.md$")
+        or test("^ops/")
+        or test("^\\.omx/plans/")
+        or test("^artifacts/")
+      )
     )
   ' >/dev/null 2>&1
 }
@@ -744,16 +823,21 @@ harness_issue_unclaim() {
   harness_issue_comment "$repo" "$issue_number" "Harness claim cleared."
 }
 
+harness_remote_branch_ref() {
+  local base
+  base="${1:-$HARNESS_BASE_BRANCH}"
+  printf 'origin/%s\n' "$base"
+}
+
 harness_ensure_base_branch() {
-  local root base
+  local root base remote_ref
   root=$(harness_repo_root)
   base="${1:-$HARNESS_BASE_BRANCH}"
+  remote_ref="refs/remotes/origin/$base"
 
-  if git -C "$root" show-ref --verify --quiet "refs/heads/$base"; then
-    return 0
-  fi
-
-  git -C "$root" fetch origin "$base:$base" >/dev/null
+  git -C "$root" fetch origin "$base" >/dev/null
+  git -C "$root" show-ref --verify --quiet "$remote_ref" \
+    || harness_die "remote base branch not found after fetch: origin/$base"
 }
 
 harness_fetch_issue_json() {
