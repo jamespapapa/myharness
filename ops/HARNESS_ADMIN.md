@@ -242,6 +242,15 @@ Expected control-room outcomes:
 - `blocked`: one lane reconciled a task to `blocked`
 - `error`: the worker could not record a valid next state
 
+If `.harness/project.env` sets `HARNESS_CONTROL_ROOM_DISCORD_WEBHOOK_URL`, blocked transitions also post one concise operator-facing Discord line that includes:
+
+- task / issue reference
+- failing lane (`executor`, `review`, `prepare`, or `land`)
+- short reason
+- expected operator action when the lane needs intervention
+
+Review rejections also post to the same channel, but as `rejected` rather than `blocked`, so non-escalation outcomes stay visible without looking like harness failures.
+
 See [ops/AUTONOMOUS_SWARM.md](/Users/jules/Desktop/work/myharness/ops/AUTONOMOUS_SWARM.md) for the cron-swarm model.
 
 Manual lane entrypoints remain available:

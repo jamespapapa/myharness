@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SOURCE_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
+
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+write_mock_binaries() {
+  local bin_dir="$1"
+
+  mkdir -p "$bin_dir"
+  cat >"$bin_dir/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+payload=""
+url=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -d|--data|--data-raw)
+      payload="${2:-}"
+      shift 2
+      ;;
+    -H|-X|-fsS)
+      if [[ "$1" == "-H" || "$1" == "-X" ]]; then
+        shift 2
+      else
+        shift
+      fi
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+
+jq -nc --arg payload "$payload" --arg url "$url" '{payload:$payload,url:$url}' >>"${HARNESS_MOCK_CURL_LOG:?}"
+EOF
+  chmod +x "$bin_dir/curl"
+
+  cat >"$bin_dir/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "auth" && "${2:-}" == "status" ]]; then
+  exit 1
+fi
+
+printf 'unexpected gh invocation in notification test: %s\n' "$*" >&2
+exit 1
+EOF
+  chmod +x "$bin_dir/gh"
+}
+
+setup_fixture() {
+  local name="$1"
+
+  FIXTURE_DIR="$TMP_DIR/$name"
+  REPO_DIR="$FIXTURE_DIR/repo"
+  BIN_DIR="$FIXTURE_DIR/bin"
+  CURL_LOG="$FIXTURE_DIR/curl.jsonl"
+
+  mkdir -p "$FIXTURE_DIR"
+  write_mock_binaries "$BIN_DIR"
+
+  rsync -a \
+    --exclude '.git' \
+    --exclude '.harness/state' \
+    --exclude '.harness/tasks' \
+    --exclude '.harness/logs' \
+    --exclude '.harness-manager' \
+    --exclude '.harness-session' \
+    "$SOURCE_ROOT/" "$REPO_DIR/"
+
+  git -C "$REPO_DIR" init -q -b main
+  git -C "$REPO_DIR" config user.name "Harness Test"
+  git -C "$REPO_DIR" config user.email "harness-test@example.com"
+  git -C "$REPO_DIR" add .
+  git -C "$REPO_DIR" commit -qm "fixture"
+
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_REPO_SLUG="example/test-harness"
+HARNESS_CONTROL_ROOM_DISCORD_WEBHOOK_URL="https://discord.example.test/control-room"
+EOF
+
+  mkdir -p "$REPO_DIR/.harness/tasks/issue-7"
+  cat >"$REPO_DIR/.harness/tasks/issue-7/task.json" <<'EOF'
+{
+  "task_id": "issue-7",
+  "issue_number": 7,
+  "title": "Synthetic issue",
+  "repo_slug": "example/test-harness",
+  "branch": "fix/issue-7",
+  "base_branch": "main",
+  "worktree": "/tmp/example-worktree",
+  "status": "in_progress",
+  "created_at": "2026-03-14T00:00:00Z",
+  "updated_at": "2026-03-14T00:00:00Z"
+}
+EOF
+}
+
+task_env() {
+  env \
+    PATH="$BIN_DIR:$PATH" \
+    HARNESS_MOCK_CURL_LOG="$CURL_LOG" \
+    "$@"
+}
+
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local message="$3"
+
+  if [[ "$haystack" != *"$needle"* ]]; then
+    printf 'assert_contains failed: %s\nneedle: %s\nhaystack: %s\n' "$message" "$needle" "$haystack" >&2
+    exit 1
+  fi
+}
+
+latest_content() {
+  jq -r '.payload | fromjson | .content' "$CURL_LOG" | tail -n 1
+}
+
+scenario_executor_blocked_via_task_finish() {
+  local content
+
+  setup_fixture "executor-blocked"
+  task_env "$REPO_DIR/scripts/task-finish" --issue 7 --blocked "executor reconcile found no commits, PR, or explicit task-finish" >/dev/null
+
+  content=$(latest_content)
+  assert_contains "$content" "[blocked][executor]" "executor blocked message should identify the outcome and lane"
+  assert_contains "$content" "example/test-harness#7 / issue-7" "executor blocked message should include the issue and task reference"
+  assert_contains "$content" "reason: executor reconcile found no commits, PR, or explicit task-finish" "executor blocked message should include the reason"
+  assert_contains "$content" "next: inspect the worker log and decide whether to resume or requeue" "executor blocked message should include the operator action"
+}
+
+scenario_prepare_blocked_default_action() {
+  local content
+
+  setup_fixture "prepare-blocked"
+  task_env bash -c '
+    source "$1/scripts/harness-lib.sh"
+    harness_control_room_notify "blocked" "prepare" "issue-7" "7" "example/test-harness" "prepare failed: npm test"
+  ' _ "$REPO_DIR"
+
+  content=$(latest_content)
+  assert_contains "$content" "[blocked][prepare]" "prepare blocked message should identify the lane"
+  assert_contains "$content" "reason: prepare failed: npm test" "prepare blocked message should keep the short reason"
+  assert_contains "$content" "next: inspect artifacts/prep/issue-7 and fix the failing gate before rerunning prepare" "prepare blocked message should include the default next action"
+}
+
+scenario_review_rejected_is_distinct() {
+  local content
+
+  setup_fixture "review-rejected"
+  task_env bash -c '
+    source "$1/scripts/harness-lib.sh"
+    harness_control_room_notify "rejected" "review" "issue-7" "7" "example/test-harness" "missing regression proof for the changed workflow"
+  ' _ "$REPO_DIR"
+
+  content=$(latest_content)
+  assert_contains "$content" "[rejected][review]" "review rejection should not be labeled as blocked"
+  assert_contains "$content" "reason: missing regression proof for the changed workflow" "review rejection should include the rejection reason"
+  assert_contains "$content" "next: inspect artifacts/reviews/issue-7 and decide whether to revise the PR or close the task" "review rejection should point operators at the review artifact"
+}
+
+scenario_land_blocked_default_action() {
+  local content
+
+  setup_fixture "land-blocked"
+  task_env bash -c '
+    source "$1/scripts/harness-lib.sh"
+    harness_control_room_notify "blocked" "land" "issue-7" "7" "example/test-harness" "remote status checks failed"
+  ' _ "$REPO_DIR"
+
+  content=$(latest_content)
+  assert_contains "$content" "[blocked][land]" "land blocked message should identify the lane"
+  assert_contains "$content" "reason: remote status checks failed" "land blocked message should include the reason"
+  assert_contains "$content" "next: inspect PR checks or merge state, then rerun land when the PR is ready" "land blocked message should include the merge action"
+}
+
+scenario_executor_blocked_via_task_finish
+scenario_prepare_blocked_default_action
+scenario_review_rejected_is_distinct
+scenario_land_blocked_default_action
+
+printf 'check-control-room-notifications passed\n'

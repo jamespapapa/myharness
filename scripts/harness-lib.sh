@@ -27,6 +27,30 @@ harness_notice() {
   printf '%s\n' "$*" >&2
 }
 
+harness_compact_text() {
+  printf '%s' "$1" \
+    | tr '\r\n\t' '   ' \
+    | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
+}
+
+harness_truncate_text() {
+  local text max
+  text=$(harness_compact_text "${1:-}")
+  max="${2:-200}"
+
+  if (( ${#text} <= max )); then
+    printf '%s' "$text"
+    return 0
+  fi
+
+  if (( max <= 3 )); then
+    printf '%.*s' "$max" "$text"
+    return 0
+  fi
+
+  printf '%s...' "${text:0:$((max - 3))}"
+}
+
 harness_slugify() {
   printf '%s' "$1" \
     | tr '[:upper:]' '[:lower:]' \
@@ -61,6 +85,7 @@ harness_load_project_env() {
   : "${HARNESS_PREPARE_COMMANDS_FILE:=$root/.harness/prepare.commands}"
   : "${HARNESS_MERGE_METHOD:=squash}"
   : "${HARNESS_REQUIRE_GREEN_CHECKS:=0}"
+  : "${HARNESS_CONTROL_ROOM_DISCORD_WEBHOOK_URL:=}"
   : "${HARNESS_LABEL_ACTIVE:=harness:in-progress}"
   : "${HARNESS_LABEL_PR_OPEN:=harness:pr-open}"
   : "${HARNESS_LABEL_DONE:=harness:done}"
@@ -730,6 +755,97 @@ harness_issue_comment() {
   gh issue comment "$issue_number" -R "$repo" --body "$body" >/dev/null
 }
 
+harness_control_room_reference() {
+  local task_id issue_number repo_slug reference
+  task_id="${1:-}"
+  issue_number="${2:-}"
+  repo_slug="${3:-}"
+
+  if [[ -n "$repo_slug" && -n "$issue_number" ]]; then
+    reference="$repo_slug#$issue_number"
+  elif [[ -n "$issue_number" ]]; then
+    reference="issue #$issue_number"
+  elif [[ -n "$task_id" ]]; then
+    reference="task $task_id"
+  else
+    reference="task"
+  fi
+
+  if [[ -n "$task_id" ]]; then
+    case "$reference" in
+      *"$task_id"*) ;;
+      *) reference="$reference / $task_id" ;;
+    esac
+  fi
+
+  printf '%s\n' "$reference"
+}
+
+harness_control_room_default_action() {
+  local outcome lane task_id
+  outcome="${1:-}"
+  lane="${2:-}"
+  task_id="${3:-}"
+
+  case "$outcome:$lane" in
+    blocked:executor)
+      printf 'inspect the worker log and decide whether to resume or requeue'
+      ;;
+    blocked:review)
+      printf 'inspect artifacts/reviews/%s and the review run log, then rerun or fix the PR' "$task_id"
+      ;;
+    blocked:prepare)
+      printf 'inspect artifacts/prep/%s and fix the failing gate before rerunning prepare' "$task_id"
+      ;;
+    blocked:land)
+      printf 'inspect PR checks or merge state, then rerun land when the PR is ready'
+      ;;
+    rejected:review)
+      printf 'inspect artifacts/reviews/%s and decide whether to revise the PR or close the task' "$task_id"
+      ;;
+    *)
+      printf ''
+      ;;
+  esac
+}
+
+harness_control_room_notify() {
+  local outcome lane task_id issue_number repo_slug reason next_action webhook_url reference message payload
+  outcome="${1:-}"
+  lane="${2:-}"
+  task_id="${3:-}"
+  issue_number="${4:-}"
+  repo_slug="${5:-}"
+  reason="${6:-}"
+  next_action="${7:-}"
+
+  harness_load_project_env
+  webhook_url="${HARNESS_CONTROL_ROOM_DISCORD_WEBHOOK_URL:-}"
+  [[ -n "$webhook_url" ]] || return 0
+
+  if ! command -v curl >/dev/null 2>&1; then
+    harness_notice "control-room webhook skipped: curl not found"
+    return 0
+  fi
+
+  reason=$(harness_truncate_text "$reason" 280)
+  if [[ -z "$next_action" ]]; then
+    next_action=$(harness_control_room_default_action "$outcome" "$lane" "$task_id")
+  fi
+  next_action=$(harness_truncate_text "$next_action" 220)
+  reference=$(harness_control_room_reference "$task_id" "$issue_number" "$repo_slug")
+
+  message="[$outcome][$lane] $reference | reason: $reason"
+  if [[ -n "$next_action" ]]; then
+    message="$message | next: $next_action"
+  fi
+
+  payload=$(jq -nc --arg content "$message" '{content:$content}')
+  if ! curl -fsS -H "Content-Type: application/json" -X POST -d "$payload" "$webhook_url" >/dev/null; then
+    harness_notice "control-room webhook post failed for $reference ($outcome/$lane)"
+  fi
+}
+
 harness_issue_started() {
   local repo issue_number task_id branch worktree login
   repo="$1"
@@ -787,6 +903,23 @@ harness_issue_blocked() {
 
   harness_issue_comment "$repo" "$issue_number" \
     "Harness status update: blocked.\n\n- reason: $reason"
+}
+
+harness_issue_rejected() {
+  local repo issue_number reason
+  repo="$1"
+  issue_number="$2"
+  reason="$3"
+
+  harness_load_project_env
+  harness_ensure_status_labels "$repo"
+  gh issue edit "$issue_number" -R "$repo" \
+    --remove-label "$HARNESS_LABEL_ACTIVE" \
+    --remove-label "$HARNESS_LABEL_PR_OPEN" \
+    --add-label "$HARNESS_LABEL_BLOCKED" >/dev/null 2>&1 || true
+
+  harness_issue_comment "$repo" "$issue_number" \
+    "Harness status update: rejected.\n\n- reason: $reason"
 }
 
 harness_issue_done() {
