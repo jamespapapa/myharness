@@ -96,6 +96,7 @@ fi
 if [[ -n "$blocked_reason" ]]; then
   harness_remove_claim "$claim_key"
   harness_update_task_status "$task_id" "blocked" "$blocked_reason" ""
+  harness_control_room_notify "blocked" "executor" "$task_id" "$issue_number" "$repo_slug" "$blocked_reason"
   if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
     harness_issue_blocked "$repo_slug" "$issue_number" "$blocked_reason"
   fi

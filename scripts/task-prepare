@@ -16,6 +16,7 @@ cleanup_prepare() {
   current_status=$(harness_task_field "$task_id" '.status // ""' 2>/dev/null || true)
   if [[ "$current_status" == "preparing" ]]; then
     harness_update_task_status "$task_id" "prepare_failed" "prepare script aborted unexpectedly" "${pr_url:-}"
+    harness_control_room_notify "blocked" "prepare" "$task_id" "${issue_number:-}" "${repo_slug:-}" "prepare script aborted unexpectedly"
   fi
 }
 
@@ -185,6 +186,7 @@ EOF
 EOF
 
   harness_update_task_status "$task_id" "prepare_failed" "prepare failed: $failed_command" "$pr_url"
+  harness_control_room_notify "blocked" "prepare" "$task_id" "$issue_number" "$repo_slug" "prepare failed: $failed_command"
   if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
     harness_issue_blocked "$repo_slug" "$issue_number" "prepare failed for PR #$pr_number: $failed_command"
   fi

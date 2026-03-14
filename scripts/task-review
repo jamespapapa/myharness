@@ -16,6 +16,7 @@ cleanup_review() {
   current_status=$(harness_task_field "$task_id" '.status // ""' 2>/dev/null || true)
   if [[ "$current_status" == "reviewing" ]]; then
     harness_update_task_status "$task_id" "review_failed" "review script aborted unexpectedly" "${pr_url:-}"
+    harness_control_room_notify "blocked" "review" "$task_id" "${issue_number:-}" "${repo_slug:-}" "review script aborted unexpectedly"
   fi
 }
 
@@ -201,6 +202,7 @@ if [[ "$review_exit" -ne 0 ]]; then
     review_reason="review runtime failed; see $review_log"
   fi
   harness_update_task_status "$task_id" "review_failed" "$review_reason" "$pr_url"
+  harness_control_room_notify "blocked" "review" "$task_id" "$issue_number" "$repo_slug" "$review_reason"
   if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
     harness_issue_blocked "$repo_slug" "$issue_number" "$review_reason"
   fi
@@ -238,8 +240,11 @@ case "$verdict" in
     ;;
   rejected)
     harness_update_task_status "$task_id" "review_failed" "$summary" "$pr_url"
+    reject_reason="$summary"
+    [[ -n "$reject_reason" ]] || reject_reason="review rejected for PR #$pr_number"
+    harness_control_room_notify "rejected" "review" "$task_id" "$issue_number" "$repo_slug" "$reject_reason"
     if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
-      harness_issue_blocked "$repo_slug" "$issue_number" "review rejected for PR #$pr_number"
+      harness_issue_rejected "$repo_slug" "$issue_number" "$reject_reason"
     fi
     printf 'review rejected: %s\n' "$task_id"
     exit 2

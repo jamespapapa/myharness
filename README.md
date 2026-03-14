@@ -19,14 +19,16 @@ What this repo gives you:
 - one-shot executor, review, prepare, and land workers
 - tracked review / prepare / land artifacts under `artifacts/`
 - GitHub label and issue-state synchronization
+- optional Discord control-room updates for blocked and rejected outcomes
 - default queue gating so autonomous fetch consumes only issues labeled `Ready`
 
 What you still need before using this on a real codebase:
 
 1. Replace [.harness/prepare.commands](/Users/jules/Desktop/work/myharness/.harness/prepare.commands) with project-specific `lint`, `test`, `build`, or invariant gates.
 2. Turn on required-check enforcement in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) by setting `HARNESS_REQUIRE_GREEN_CHECKS="1"` if you want merge to wait for GitHub checks.
-3. Add GitHub issue forms or use `scripts/task-intake` consistently, because this seed repo does not yet enforce intake quality through `.github/ISSUE_TEMPLATE/`.
-4. If you want multiple repo channels or wider fan-out, add them on top of the control-room tick intentionally; the safe default here is one repo channel plus one serialized wake loop.
+3. Set `HARNESS_CONTROL_ROOM_DISCORD_WEBHOOK_URL` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) if you want blocked executor/review/prepare/land outcomes and review rejections to post concise operator-facing lines to a Discord control-room channel.
+4. Add GitHub issue forms or use `scripts/task-intake` consistently, because this seed repo does not yet enforce intake quality through `.github/ISSUE_TEMPLATE/`.
+5. If you want multiple repo channels or wider fan-out, add them on top of the control-room tick intentionally; the safe default here is one repo channel plus one serialized wake loop.
 
 Quick start:
 
