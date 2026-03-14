@@ -337,6 +337,63 @@ EOF
   fi
 }
 
+scenario_task_start_rechecks_active_limit_under_lock() {
+  local now_epoch now_iso output claim_keys
+
+  setup_fixture "start-enforce-limit"
+  now_epoch=$(date -u +%s)
+  now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  mkdir -p "$REPO_DIR/.harness/tasks/issue-9001" "$WORKTREE_ROOT/issue-9001"
+
+  cat >"$REPO_DIR/.harness/tasks/issue-9001/task.json" <<EOF
+{
+  "task_id": "issue-9001",
+  "issue_number": 9001,
+  "title": "Already active issue",
+  "repo_slug": "example/test-harness",
+  "branch": "fix/issue-9001",
+  "base_branch": "main",
+  "worktree": "$WORKTREE_ROOT/issue-9001",
+  "status": "in_progress",
+  "created_at": "$now_iso",
+  "updated_at": "$now_iso"
+}
+EOF
+
+  mkdir -p "$REPO_DIR/.harness/state"
+  cat >"$REPO_DIR/.harness/state/claims.json" <<EOF
+{
+  "example/test-harness#9001": {
+    "repo": "example/test-harness",
+    "issue_number": 9001,
+    "task_id": "issue-9001",
+    "branch": "fix/issue-9001",
+    "worktree": "$WORKTREE_ROOT/issue-9001",
+    "agent": "codex",
+    "status": "in_progress",
+    "claimed_at": "$now_iso",
+    "claimed_epoch": $now_epoch
+  }
+}
+EOF
+
+  write_mock_issue 9002 "Queued issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9002,"title":"Queued issue","labels":[{"name":"Ready"}]}]'
+
+  if output=$(task_env "$REPO_DIR/scripts/task-start" --issue 9002 --enforce-active-limit 2>&1); then
+    printf 'task-start should have enforced the active executor limit under lock\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$output" "active executor limit reached: total=1 limit=1" "task-start should reject claims once the active executor limit is full"
+  claim_keys=$(jq -r 'keys[]' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_keys" "example/test-harness#9001" "task-start should not add a second claim when the active limit is full"
+  if [[ -e "$REPO_DIR/.harness/tasks/issue-9002/task.json" ]]; then
+    printf 'issue-9002 should not have been materialized when task-start hit the active limit\n' >&2
+    exit 1
+  fi
+}
+
 scenario_waits_when_queue_empty_but_active_work_remains() {
   local now_epoch now_iso output
 
@@ -442,6 +499,7 @@ EOF
 
 scenario_claim_and_reconcile_to_pr_open
 scenario_waits_when_active_limit_is_full
+scenario_task_start_rechecks_active_limit_under_lock
 scenario_waits_when_queue_empty_but_active_work_remains
 scenario_recovers_stale_in_progress_task
 

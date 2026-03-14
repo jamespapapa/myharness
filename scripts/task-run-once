@@ -406,7 +406,19 @@ if [[ "$dry_run" -eq 1 ]]; then
   exit 0
 fi
 
-if ! start_output=$("$SCRIPT_DIR/task-start" --issue "$issue_number" 2>&1); then
+if ! start_output=$("$SCRIPT_DIR/task-start" --issue "$issue_number" --enforce-active-limit 2>&1); then
+  if [[ "$start_output" == *"active executor limit reached:"* ]]; then
+    waiting_detail="active limit reached during claim for issue #$issue_number; $active_summary_text"
+    emit_log "waiting" "active limit reached during claim" "$issue_number" "$task_id" "$waiting_detail"
+    printf 'waiting: %s\n' "$waiting_detail"
+    exit 0
+  fi
+  if [[ "$start_output" == *"already claimed:"* ]]; then
+    waiting_detail="claim race lost for issue #$issue_number; another worker already claimed it"
+    emit_log "waiting" "claim race lost" "$issue_number" "$task_id" "$waiting_detail"
+    printf 'waiting: %s\n' "$waiting_detail"
+    exit 0
+  fi
   emit_log "error" "task-start failed" "$issue_number" "$task_id" "$start_output"
   printf '%s\n' "$start_output" >&2
   exit 1

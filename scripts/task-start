@@ -13,6 +13,7 @@ body=""
 label_filter=""
 launch=""
 use_next=0
+enforce_active_limit=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -44,9 +45,13 @@ while [[ $# -gt 0 ]]; do
       launch="${2:-}"
       shift 2
       ;;
+    --enforce-active-limit)
+      enforce_active_limit=1
+      shift
+      ;;
     -h|--help)
       cat <<'EOF'
-usage: scripts/task-start [--issue <n> | --next | --task-id <id> --title <title>] [--label <label>] [--body <text>] [--launch codex]
+usage: scripts/task-start [--issue <n> | --next | --task-id <id> --title <title>] [--label <label>] [--body <text>] [--launch codex] [--enforce-active-limit]
 EOF
       exit 0
       ;;
@@ -90,6 +95,13 @@ else
   claim_key=$(harness_claim_key "" "" "$task_id")
   if jq -e --arg key "$claim_key" 'has($key)' "$HARNESS_CLAIMS_FILE" >/dev/null 2>&1; then
     harness_die "task is already claimed: $claim_key"
+  fi
+fi
+
+if [[ "$enforce_active_limit" -eq 1 ]]; then
+  active_total=$(harness_count_tasks_by_status "in_progress")
+  if (( active_total >= HARNESS_EXECUTOR_ACTIVE_LIMIT )); then
+    harness_die "active executor limit reached: total=$active_total limit=$HARNESS_EXECUTOR_ACTIVE_LIMIT"
   fi
 fi
 
