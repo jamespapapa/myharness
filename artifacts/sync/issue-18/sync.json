@@ -1,0 +1,15 @@
+{
+  "sync_id": "issue-18",
+  "source_harness_core_revision": "seed-bootstrap@bc4332b6edd7f1b43abd15df11e7369945b8038d",
+  "target_repo": "jamespapapa/myharness",
+  "shared_paths": [
+    ".harness/path-ownership.json",
+    "ops/HARNESS_SYNC.md",
+    "scripts/check-harness",
+    "scripts/check-sync-owned-paths"
+  ],
+  "overlay_conflicts": [],
+  "verification": [
+    "scripts/check-harness"
+  ]
+}

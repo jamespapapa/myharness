@@ -1,0 +1,388 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+WORKTREE_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
+SOURCE_ROOT="$WORKTREE_ROOT"
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+MANIFEST_REL=".harness/path-ownership.json"
+base_ref=""
+self_test=0
+
+usage() {
+  cat <<'EOF'
+usage: scripts/check-sync-owned-paths [--base <ref>] [--self-test]
+EOF
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+path_matches_any() {
+  local path="$1"
+  shift || true
+
+  local pattern
+  for pattern in "$@"; do
+    [[ -n "$pattern" ]] || continue
+    if [[ "$path" == $pattern ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+resolve_base_ref() {
+  local project_env
+  project_env="$WORKTREE_ROOT/.harness/project.env"
+
+  if [[ -f "$project_env" ]]; then
+    # shellcheck source=/dev/null
+    source "$project_env"
+  fi
+
+  : "${HARNESS_BASE_BRANCH:=main}"
+
+  if [[ -n "$base_ref" ]]; then
+    printf '%s\n' "$base_ref"
+    return 0
+  fi
+
+  if git rev-parse --verify --quiet "refs/remotes/origin/$HARNESS_BASE_BRANCH" >/dev/null; then
+    printf 'refs/remotes/origin/%s\n' "$HARNESS_BASE_BRANCH"
+    return 0
+  fi
+
+  if git rev-parse --verify --quiet "$HARNESS_BASE_BRANCH" >/dev/null; then
+    printf '%s\n' "$HARNESS_BASE_BRANCH"
+    return 0
+  fi
+
+  die "unable to resolve base ref; pass --base <ref> or create $HARNESS_BASE_BRANCH"
+}
+
+collect_changed_paths() {
+  local merge_base="$1"
+
+  {
+    git diff --name-only "$merge_base...HEAD"
+    git diff --name-only --cached
+    git diff --name-only
+    git ls-files --others --exclude-standard
+  } | awk 'NF' | sort -u
+}
+
+sync_metadata_is_valid() {
+  local file="$1"
+
+  jq -e '
+    (.sync_id | strings | length > 0) and
+    (.source_harness_core_revision | strings | length > 0) and
+    (.target_repo | strings | length > 0) and
+    (.shared_paths | arrays) and
+    (.overlay_conflicts | arrays) and
+    (.verification | arrays)
+  ' "$file" >/dev/null
+}
+
+sync_metadata_covers_path() {
+  local file="$1"
+  local target_path="$2"
+  local pattern
+
+  while IFS= read -r pattern; do
+    [[ -n "$pattern" ]] || continue
+    if path_matches_any "$target_path" "$pattern"; then
+      return 0
+    fi
+  done < <(jq -r '.shared_paths[]' "$file")
+
+  return 1
+}
+
+run_check() {
+  local repo_root manifest_file resolved_base merge_base path sync_hint sync_file covered
+  local -a core_owned_paths=()
+  local -a project_owned_paths=()
+  local -a sync_metadata_paths=()
+  local -a violating_paths=()
+  local -a valid_sync_files=()
+  local -a invalid_sync_files=()
+  local -a uncovered_paths=()
+
+  repo_root="$WORKTREE_ROOT"
+  manifest_file="$repo_root/$MANIFEST_REL"
+  [[ -f "$manifest_file" ]] || die "missing ownership manifest: $manifest_file"
+
+  while IFS= read -r path; do
+    core_owned_paths+=("$path")
+  done < <(jq -r '.core_owned_paths[]' "$manifest_file")
+
+  while IFS= read -r path; do
+    project_owned_paths+=("$path")
+  done < <(jq -r '.project_owned_paths[]' "$manifest_file")
+
+  while IFS= read -r path; do
+    sync_metadata_paths+=("$path")
+  done < <(jq -r '.sync_metadata_paths[]' "$manifest_file")
+
+  cd "$repo_root"
+  resolved_base=$(resolve_base_ref)
+  merge_base=$(git merge-base HEAD "$resolved_base") || die "unable to compute merge-base against $resolved_base"
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+
+    if path_matches_any "$path" "${sync_metadata_paths[@]}"; then
+      if [[ -f "$path" ]] && sync_metadata_is_valid "$path"; then
+        valid_sync_files+=("$path")
+      else
+        invalid_sync_files+=("$path")
+      fi
+    fi
+
+    if path_matches_any "$path" "${core_owned_paths[@]}" && ! path_matches_any "$path" "${project_owned_paths[@]}"; then
+      violating_paths+=("$path")
+    fi
+  done < <(collect_changed_paths "$merge_base")
+
+  if (( ${#invalid_sync_files[@]} > 0 )); then
+    printf 'invalid sync metadata:\n' >&2
+    printf '  - %s\n' "${invalid_sync_files[@]}" >&2
+    printf 'sync metadata must include sync_id, source_harness_core_revision, target_repo, shared_paths, overlay_conflicts, and verification.\n' >&2
+    return 1
+  fi
+
+  if (( ${#violating_paths[@]} == 0 )); then
+    printf 'check-sync-owned-paths passed\n'
+    return 0
+  fi
+
+  if (( ${#valid_sync_files[@]} > 0 )); then
+    for path in "${violating_paths[@]}"; do
+      covered=0
+      for sync_file in "${valid_sync_files[@]}"; do
+        if sync_metadata_covers_path "$sync_file" "$path"; then
+          covered=1
+          break
+        fi
+      done
+
+      if [[ "$covered" -eq 0 ]]; then
+        uncovered_paths+=("$path")
+      fi
+    done
+
+    if (( ${#uncovered_paths[@]} == 0 )); then
+      printf 'check-sync-owned-paths passed\n'
+      return 0
+    fi
+
+    printf 'sync metadata does not declare all changed sync-owned paths:\n' >&2
+    printf '  - %s\n' "${uncovered_paths[@]}" >&2
+    printf 'update the shared_paths list in %s to match the sync-owned files changed on this branch.\n' "${valid_sync_files[0]}" >&2
+    return 1
+  fi
+
+  sync_hint=$(jq -r '.sync_metadata_paths[0]' "$manifest_file")
+  printf 'sync-owned paths changed without sync metadata:\n' >&2
+  printf '  - %s\n' "${violating_paths[@]}" >&2
+  printf 'add %s with source_harness_core_revision, target_repo, shared_paths, overlay_conflicts, and verification before changing sync-owned files.\n' "$sync_hint" >&2
+  return 1
+}
+
+assert_eq() {
+  local actual="$1"
+  local expected="$2"
+  local message="$3"
+
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'assert_eq failed: %s\nexpected: %s\nactual:   %s\n' "$message" "$expected" "$actual" >&2
+    exit 1
+  fi
+}
+
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local message="$3"
+
+  if [[ "$haystack" != *"$needle"* ]]; then
+    printf 'assert_contains failed: %s\nneedle: %s\nhaystack: %s\n' "$message" "$needle" "$haystack" >&2
+    exit 1
+  fi
+}
+
+setup_fixture_repo() {
+  local fixture_dir="$1"
+  local repo_dir="$fixture_dir/repo"
+
+  mkdir -p "$fixture_dir"
+  rsync -a \
+    --exclude '.git' \
+    --exclude '.harness/state' \
+    --exclude '.harness/tasks' \
+    --exclude '.harness/logs' \
+    --exclude '.harness-manager' \
+    --exclude '.harness-session' \
+    "$SOURCE_ROOT/" "$repo_dir/"
+
+  git -C "$repo_dir" init -q -b main
+  git -C "$repo_dir" config user.name "Harness Test"
+  git -C "$repo_dir" config user.email "harness-test@example.com"
+  git -C "$repo_dir" add .
+  git -C "$repo_dir" commit -qm "fixture"
+  git -C "$repo_dir" checkout -q -b fix/test-sync-ownership
+
+  printf '%s\n' "$repo_dir"
+}
+
+run_fixture_check() {
+  local repo_dir="$1"
+  local output_file="$2"
+  local status=0
+
+  if (cd "$repo_dir" && ./scripts/check-sync-owned-paths --base main) >"$output_file" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+
+  printf '%s\n' "$status"
+}
+
+scenario_project_owned_paths_pass() {
+  local fixture_dir repo_dir output_file status
+  fixture_dir="$TMP_DIR/project-owned"
+  rm -rf "$fixture_dir"
+
+  repo_dir=$(setup_fixture_repo "$fixture_dir")
+  mkdir -p "$repo_dir/docs" "$repo_dir/src"
+  printf '\n# project tweak\n' >>"$repo_dir/.harness/project.env"
+  printf '\n# local gate\n' >>"$repo_dir/.harness/prepare.commands"
+  printf '\nProject overlay note.\n' >>"$repo_dir/AGENTS.md"
+  printf 'project doc\n' >"$repo_dir/docs/local-overlay.md"
+  printf 'export const product = true;\n' >"$repo_dir/src/product.ts"
+  git -C "$repo_dir" add .harness/project.env .harness/prepare.commands AGENTS.md docs/local-overlay.md src/product.ts
+  git -C "$repo_dir" commit -qm "project-owned changes"
+
+  output_file="$fixture_dir/output.txt"
+  status=$(run_fixture_check "$repo_dir" "$output_file")
+  assert_eq "$status" "0" "project-owned paths should pass without sync metadata"
+  assert_contains "$(cat "$output_file")" "check-sync-owned-paths passed" "project-owned paths should report success"
+}
+
+scenario_core_owned_paths_fail_without_sync_metadata() {
+  local fixture_dir repo_dir output_file status output
+  fixture_dir="$TMP_DIR/core-without-sync"
+  rm -rf "$fixture_dir"
+
+  repo_dir=$(setup_fixture_repo "$fixture_dir")
+  printf '\nExecutable enforcement detail.\n' >>"$repo_dir/ops/HARNESS_SYNC.md"
+  git -C "$repo_dir" add ops/HARNESS_SYNC.md
+  git -C "$repo_dir" commit -qm "edit sync-owned doc without metadata"
+
+  output_file="$fixture_dir/output.txt"
+  status=$(run_fixture_check "$repo_dir" "$output_file")
+  output=$(cat "$output_file")
+
+  assert_eq "$status" "1" "sync-owned paths should fail without sync metadata"
+  assert_contains "$output" "ops/HARNESS_SYNC.md" "failing output should list the changed sync-owned path"
+  assert_contains "$output" "artifacts/sync/**/sync.json" "failing output should point at the required sync metadata path"
+}
+
+scenario_core_owned_paths_pass_with_sync_metadata() {
+  local fixture_dir repo_dir output_file status
+  fixture_dir="$TMP_DIR/core-with-sync"
+  rm -rf "$fixture_dir"
+
+  repo_dir=$(setup_fixture_repo "$fixture_dir")
+  mkdir -p "$repo_dir/artifacts/sync/issue-55"
+  printf '\nExecutable enforcement detail.\n' >>"$repo_dir/scripts/check-harness"
+  cat >"$repo_dir/artifacts/sync/issue-55/sync.json" <<'EOF'
+{
+  "sync_id": "issue-55",
+  "source_harness_core_revision": "seed-bootstrap",
+  "target_repo": "example/test-harness",
+  "shared_paths": [
+    "scripts/check-harness"
+  ],
+  "overlay_conflicts": [],
+  "verification": [
+    "scripts/check-harness"
+  ]
+}
+EOF
+  git -C "$repo_dir" add scripts/check-harness artifacts/sync/issue-55/sync.json
+  git -C "$repo_dir" commit -qm "edit sync-owned script with metadata"
+
+  output_file="$fixture_dir/output.txt"
+  status=$(run_fixture_check "$repo_dir" "$output_file")
+  assert_eq "$status" "0" "sync-owned paths should pass with valid sync metadata"
+  assert_contains "$(cat "$output_file")" "check-sync-owned-paths passed" "valid sync metadata should allow the change"
+}
+
+scenario_invalid_sync_metadata_fails() {
+  local fixture_dir repo_dir output_file status output
+  fixture_dir="$TMP_DIR/invalid-sync"
+  rm -rf "$fixture_dir"
+
+  repo_dir=$(setup_fixture_repo "$fixture_dir")
+  mkdir -p "$repo_dir/artifacts/sync/issue-56"
+  printf '\nExecutable enforcement detail.\n' >>"$repo_dir/scripts/check-harness"
+  cat >"$repo_dir/artifacts/sync/issue-56/sync.json" <<'EOF'
+{
+  "sync_id": "issue-56",
+  "target_repo": "example/test-harness"
+}
+EOF
+  git -C "$repo_dir" add scripts/check-harness artifacts/sync/issue-56/sync.json
+  git -C "$repo_dir" commit -qm "invalid sync metadata"
+
+  output_file="$fixture_dir/output.txt"
+  status=$(run_fixture_check "$repo_dir" "$output_file")
+  output=$(cat "$output_file")
+
+  assert_eq "$status" "1" "invalid sync metadata should fail"
+  assert_contains "$output" "invalid sync metadata" "invalid sync metadata should be reported"
+}
+
+run_self_test() {
+  scenario_project_owned_paths_pass
+  scenario_core_owned_paths_fail_without_sync_metadata
+  scenario_core_owned_paths_pass_with_sync_metadata
+  scenario_invalid_sync_metadata_fails
+  printf 'check-sync-owned-paths self-test passed\n'
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --base)
+      base_ref="${2:-}"
+      shift 2
+      ;;
+    --self-test)
+      self_test=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+if [[ "$self_test" -eq 1 ]]; then
+  run_self_test
+else
+  run_check
+fi

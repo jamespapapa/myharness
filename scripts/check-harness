@@ -36,6 +36,7 @@ scripts=(
   scripts/check-sync-request
   scripts/check-control-room-notifications
   scripts/check-review-outcomes
+  scripts/check-sync-owned-paths
   scripts/check-stage-reporting
   scripts/check-task-control-room-once
   scripts/check-task-run-once
@@ -66,6 +67,8 @@ scripts/check-manager-workspace
 scripts/check-sync-request
 scripts/check-control-room-notifications
 scripts/check-review-outcomes
+scripts/check-sync-owned-paths --self-test
+scripts/check-sync-owned-paths
 scripts/check-stage-reporting
 scripts/check-task-control-room-once
 scripts/check-task-run-once
