@@ -164,6 +164,8 @@ setup_fixture() {
   git init --bare -q "$REMOTE_DIR"
   git -C "$REPO_DIR" remote add origin "$REMOTE_DIR"
   git -C "$REPO_DIR" push -u origin main >/dev/null 2>&1
+  git -C "$REPO_DIR" branch dev main
+  git -C "$REPO_DIR" push -u origin dev >/dev/null 2>&1
 
   cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
 HARNESS_REPO_SLUG="example/test-harness"

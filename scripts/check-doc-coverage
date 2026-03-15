@@ -88,19 +88,21 @@ emit_added_paths_from_name_status() {
 }
 
 doc_coverage_base_ref() {
+  local base_branch
   harness_load_project_env
+  base_branch="$HARNESS_BASE_BRANCH"
 
-  if git -C "$ROOT" show-ref --verify --quiet "refs/remotes/origin/$HARNESS_BASE_BRANCH"; then
-    printf 'origin/%s\n' "$HARNESS_BASE_BRANCH"
+  if git -C "$ROOT" show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
+    printf 'origin/%s\n' "$base_branch"
     return 0
   fi
 
-  if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$HARNESS_BASE_BRANCH"; then
-    printf '%s\n' "$HARNESS_BASE_BRANCH"
+  if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$base_branch"; then
+    printf '%s\n' "$base_branch"
     return 0
   fi
 
-  harness_die "doc coverage base branch not found: $HARNESS_BASE_BRANCH"
+  harness_die "doc coverage base branch not found: $base_branch"
 }
 
 collect_changed_paths() {
@@ -294,7 +296,8 @@ setup_self_test_repo() {
   git -C "$repo_dir" config user.email "harness-test@example.com"
   git -C "$repo_dir" add .
   git -C "$repo_dir" commit -qm "fixture"
-  git -C "$repo_dir" checkout -q -b fix/doc-coverage
+  git -C "$repo_dir" branch dev main
+  git -C "$repo_dir" checkout -q -b fix/doc-coverage dev
 
   printf '%s\n' "$repo_dir"
 }
@@ -335,6 +338,12 @@ run_self_test() {
   git -C "$repo_dir" commit -qm "range change"
   head=$(git -C "$repo_dir" rev-parse HEAD)
   assert_ok "$repo_dir" "range mode should honor the same rules as local mode" bash ./scripts/check-doc-coverage --base-sha "$base" --head-sha "$head"
+
+  repo_dir=$(setup_self_test_repo "explicit-base-override")
+  git -C "$repo_dir" checkout -q main
+  git -C "$repo_dir" checkout -q -b hotfix/docs-base main
+  printf 'scratch note\n' >"$repo_dir/notes.txt"
+  assert_ok "$repo_dir" "local mode should honor HARNESS_BASE_BRANCH overrides instead of forcing the integration branch" env HARNESS_BASE_BRANCH=main bash ./scripts/check-doc-coverage
 
   printf 'check-doc-coverage self-test passed\n'
 }

@@ -134,6 +134,7 @@ When adding the harness kernel, prioritize these files:
 - Precedence must stay explicit: harness-core defaults < project overlay < task/run artifact < explicit operator override.
 - Do not hard-code repo-specific behavior into the core unless it is truly universal.
 - Multi-project rollout should use one control-tower channel per project plus one or more execution channels, while queue fetch/claim stays centralized.
+- Per-project branch strategy should stay declarative: issue work flows through a configurable integration branch, while release promotion stays separate on the release branch.
 - Shared harness-core paths inside project repos are sync-owned and should change only through harness sync.
 - Project `AGENTS.md` files should stay concise and stable: purpose, long-lived constraints, harness ownership contract, and a map to detailed docs.
 - Detailed architecture, schema, ops, and integration knowledge should live in dedicated docs, with AGENTS linking to them instead of duplicating them.

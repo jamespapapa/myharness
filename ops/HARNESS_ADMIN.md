@@ -46,9 +46,15 @@ The human manager should spend time deciding scope and priority, not hand-carryi
 ## Bootstrap
 
 1. Review [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml) and adjust the control-tower channel key, execution channels, runner paths, queue defaults, and `manager_dir` for the project.
-2. Review [project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) and adjust runtime integrations or base branch settings if needed.
+2. Review [project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) and adjust runtime integrations plus integration/release branch settings if needed.
 3. Run `scripts/openclaw-manager-setup`.
 4. Start the manager session from the rendered `manager_dir` path from `project.yaml` (default: `.harness-manager/openclaw`).
+
+## Branch Strategy
+
+- `HARNESS_INTEGRATION_BRANCH` is the default source branch for new issue worktrees and the default PR target for issue work.
+- `HARNESS_RELEASE_BRANCH` stays separate for later promotion from the integration branch into release.
+- `HARNESS_BASE_BRANCH` remains a compatibility alias and resolves to the integration branch unless an operator overrides it explicitly.
 
 ## Production Checklist
 

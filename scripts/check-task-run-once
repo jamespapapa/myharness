@@ -198,6 +198,8 @@ setup_fixture() {
   git init --bare -q "$REMOTE_DIR"
   git -C "$REPO_DIR" remote add origin "$REMOTE_DIR"
   git -C "$REPO_DIR" push -u origin main >/dev/null 2>&1
+  git -C "$REPO_DIR" branch dev main
+  git -C "$REPO_DIR" push -u origin dev >/dev/null 2>&1
 
   cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
 HARNESS_AUTONOMOUS_LABEL="Ready"
@@ -297,7 +299,7 @@ scenario_waits_when_active_limit_is_full() {
   "title": "Already active issue",
   "repo_slug": "example/test-harness",
   "branch": "fix/issue-9001",
-  "base_branch": "main",
+  "base_branch": "dev",
   "worktree": "$WORKTREE_ROOT/issue-9001",
   "status": "in_progress",
   "created_at": "$now_iso",
@@ -352,7 +354,7 @@ scenario_task_start_rechecks_active_limit_under_lock() {
   "title": "Already active issue",
   "repo_slug": "example/test-harness",
   "branch": "fix/issue-9001",
-  "base_branch": "main",
+  "base_branch": "dev",
   "worktree": "$WORKTREE_ROOT/issue-9001",
   "status": "in_progress",
   "created_at": "$now_iso",
@@ -409,7 +411,7 @@ scenario_waits_when_queue_empty_but_active_work_remains() {
   "title": "Still running",
   "repo_slug": "example/test-harness",
   "branch": "fix/issue-9001",
-  "base_branch": "main",
+  "base_branch": "dev",
   "worktree": "$WORKTREE_ROOT/issue-9001",
   "status": "in_progress",
   "created_at": "$now_iso",
@@ -448,7 +450,7 @@ scenario_recovers_stale_in_progress_task() {
   stale_epoch=$(( $(date -u +%s) - 10 ))
   stale_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-  git -C "$REPO_DIR" checkout -q -b fix/issue-9001
+  git -C "$REPO_DIR" checkout -q -b fix/issue-9001 dev
   printf '\nStale ACP worktree change.\n' >>"$REPO_DIR/README.md"
 
   mkdir -p "$REPO_DIR/.harness/tasks/issue-9001" "$REPO_DIR/.harness/state"
@@ -459,7 +461,7 @@ scenario_recovers_stale_in_progress_task() {
   "title": "Recover stale in-progress issue",
   "repo_slug": "example/test-harness",
   "branch": "fix/issue-9001",
-  "base_branch": "main",
+  "base_branch": "dev",
   "worktree": "$REPO_DIR",
   "status": "in_progress",
   "created_at": "$stale_iso",

@@ -143,7 +143,13 @@ The canonical repo can remain available for manual development, review, and insp
 
 ## Branching Model
 
-The default kernel currently works on `main`, but the intended project model should support:
+The kernel now supports a split branch model:
+
+- a configurable integration branch for issue worktree creation, freshness checks, and issue PR targets,
+- a separate configurable release branch for later promotion and release metadata,
+- `HARNESS_BASE_BRANCH` as a compatibility alias that follows the integration branch by default.
+
+In this seed repo, that means:
 
 - `main` as release branch,
 - `dev` as integration branch,
