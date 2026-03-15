@@ -89,6 +89,7 @@ next_issue_json() {
 }
 
 task_snapshot_by_id() {
+
   local task_id="$1"
   local task_json_path task_json repo_slug issue_number claim_key claim_json
 
@@ -495,7 +496,7 @@ if ! next_output=$(next_issue_json 2>&1); then
 
     idle_detail="ready queue empty; no active executor work"
     emit_log "idle" "ready queue empty; no active executor work" "" "" "$idle_detail"
-    printf 'idle: %s\n' "$idle_detail"
+    harness_control_room_idle_line
     exit 0
   fi
 

@@ -75,6 +75,12 @@ It must leave a JSONL line in `.harness/logs/task-control-room-once.jsonl` or th
 `idle` means the Ready queue is empty and there is no unresolved active work in land/prepare/review/executor lanes.
 `waiting` means the Ready queue is empty but active work is still running/reconciling, or a higher-priority lane still needs another wake before new claims.
 
+Operator-facing idle stdout is canonical across the control-room flow:
+
+- `checked: no work (Ready queue empty)`
+
+Lane-specific idle reasons stay in the JSONL `detail` field for parsing and debugging.
+
 ## Local Cron Example
 
 One repo-level worker every 5 minutes:

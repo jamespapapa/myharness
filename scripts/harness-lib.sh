@@ -27,6 +27,10 @@ harness_notice() {
   printf '%s\n' "$*" >&2
 }
 
+harness_control_room_idle_line() {
+  printf 'checked: no work (Ready queue empty)\n'
+}
+
 harness_compact_text() {
   printf '%s' "$1" \
     | tr '\r\n\t' '   ' \

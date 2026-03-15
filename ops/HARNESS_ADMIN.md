@@ -20,6 +20,8 @@ The human manager should spend time deciding scope and priority, not hand-carryi
 - `task-land` now performs the merge when review and prepare artifacts match the current PR head and base.
 - Queue selection is currently oldest eligible issue first, gated by the `Ready` label by default and overrideable with `--label`.
 - `task-control-room-once` now advances `land -> prepare -> review -> executor` from one repo-level wake loop.
+- When the Ready queue is empty and there is no unresolved active work, the control-room flow now emits one canonical stdout line: `checked: no work (Ready queue empty)`.
+- Lane-specific idle reasons still stay in JSONL `detail` fields for land/prepare/review/executor logs so operators and tooling can distinguish why a lane was idle without changing the operator-facing status line.
 - The current validation depth is one docs-only issue. For a real codebase, you still need project-specific gates and required-check policy.
 - Issue intake quality is still a policy and script convention here, not a GitHub-enforced issue form.
 

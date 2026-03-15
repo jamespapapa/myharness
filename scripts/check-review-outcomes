@@ -477,7 +477,7 @@ scenario_rejected_is_terminal_without_blocking() {
   assert_eq "$stage" "review_rejected" "stage summary should record the rejection outcome"
   assert_contains "$labels" "harness:pr-open" "rejected work should remain visible as a PR-backed task"
   assert_not_contains "$labels" "harness:blocked" "rejected work should not be labeled as blocked"
-  assert_eq "$output" "idle: ready queue empty; no active executor work" "rejected work should not automatically re-enter executor or blocked lanes"
+  assert_eq "$output" "checked: no work (Ready queue empty)" "rejected work should not automatically re-enter executor or blocked lanes"
 }
 
 scenario_third_rework_blocks() {
