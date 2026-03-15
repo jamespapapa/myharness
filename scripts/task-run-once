@@ -264,7 +264,7 @@ reconcile_task() {
     pr_url=$(jq -r '.pr_url // ""' "$task_json_path")
 
     case "$status" in
-      pr_open|done|blocked)
+      pr_open|done|blocked|rejected)
         if [[ -n "$claim_key" ]]; then
           harness_remove_claim "$claim_key"
         fi
@@ -349,6 +349,84 @@ reconcile_task() {
   esac
 }
 
+launch_worker_for_task() {
+  local task_json_path="$1"
+  local launch_message="$2"
+  local task_json issue_number task_id title worktree worker_log finish_script repo_slug claim_key gh_token worker_prompt
+  local -a codex_env
+  local worker_exit task_snapshot status pr_url note
+
+  task_json=$(cat "$task_json_path")
+  issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
+  task_id=$(printf '%s' "$task_json" | jq -r '.task_id')
+  title=$(printf '%s' "$task_json" | jq -r '.title')
+  worktree=$(printf '%s' "$task_json" | jq -r '.worktree')
+  worker_log="$HARNESS_LOG_DIR/$task_id-$(date -u +%Y%m%dT%H%M%SZ).log"
+  finish_script="$(harness_repo_root)/scripts/task-finish"
+  repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
+  claim_key=$(harness_claim_key "$repo_slug" "$issue_number" "$task_id")
+  gh_token=""
+  codex_env=()
+  if harness_can_sync_github; then
+    gh_token="$(gh auth token 2>/dev/null || true)"
+  fi
+  if [[ -n "$gh_token" ]]; then
+    codex_env=(GH_TOKEN="$gh_token" GITHUB_TOKEN="$gh_token")
+  fi
+
+  emit_log "claimed" "$launch_message" "$issue_number" "$task_id" "$title"
+  harness_update_claim_status "$claim_key" "in_progress" "executor running" "$worker_log"
+
+  worker_prompt=$(cat <<EOF
+Read .harness-session/codex/AGENTS.md, .harness-session/codex/TASK.md, and .harness-session/codex/PR_BODY.md from the current repository root. Follow them exactly and complete the task end-to-end.
+
+Important execution split:
+
+- You own code changes, verification, and a focused local git commit.
+- The parent harness process will handle push + PR creation after you exit if a local commit exists.
+- Only call $finish_script yourself when the task is blocked or when you need to record a terminal failure reason.
+- Do not spawn child agents or wait on other agents from this task worker.
+- Finish in one pass and exit promptly after your local work is done.
+
+If you cannot complete the task, record the blocker with task-finish before exit.
+EOF
+)
+
+  worker_exit=0
+  if (cd "$worktree" && harness_run_with_timeout "$HARNESS_EXECUTOR_TIMEOUT_SECONDS" env "${codex_env[@]}" codex exec --disable child_agents_md --full-auto "$worker_prompt") >"$worker_log" 2>&1; then
+    worker_exit=0
+  else
+    worker_exit=$?
+  fi
+
+  harness_update_claim_status "$claim_key" "reconciling" "executor exited with code $worker_exit" "$worker_log" "$worker_exit"
+
+  task_snapshot=$(task_snapshot_by_id "$task_id")
+  status=$(printf '%s' "$task_snapshot" | jq -r '.status // "unknown"')
+  pr_url=$(printf '%s' "$task_snapshot" | jq -r '.pr_url // ""')
+  note=$(printf '%s' "$task_snapshot" | jq -r '.note // ""')
+
+  case "$status" in
+    pr_open)
+      emit_log "success" "worker opened PR" "$issue_number" "$task_id" "$pr_url"
+      printf 'success: issue #%s -> PR %s\n' "$issue_number" "$pr_url"
+      return 0
+      ;;
+    done)
+      emit_log "success" "task reached done state" "$issue_number" "$task_id" "${pr_url:-$note}"
+      printf 'success: issue #%s marked done\n' "$issue_number"
+      return 0
+      ;;
+    blocked)
+      emit_log "blocked" "worker marked task blocked" "$issue_number" "$task_id" "$note"
+      printf 'blocked: issue #%s -> %s\n' "$issue_number" "$note"
+      return 2
+      ;;
+  esac
+
+  reconcile_task "$task_snapshot"
+}
+
 active_tasks=$(active_tasks_json)
 active_total=$(printf '%s' "$active_tasks" | jq 'length')
 active_summary_text=$(active_summary "$active_tasks")
@@ -363,6 +441,43 @@ if reconcilable_task=$(find_reconcilable_active_task "$active_tasks" 2>/dev/null
     exit 0
   fi
   if reconcile_task "$reconcilable_task"; then
+    exit 0
+  else
+    exit $?
+  fi
+fi
+
+next_rework_task=$(harness_find_next_task_by_status "rework" || true)
+if [[ -n "$next_rework_task" ]]; then
+  rework_issue_number=$(printf '%s' "$next_rework_task" | jq -r '.issue_number // ""')
+  rework_task_id=$(printf '%s' "$next_rework_task" | jq -r '.task_id')
+  rework_title=$(printf '%s' "$next_rework_task" | jq -r '.title')
+  if (( active_total >= HARNESS_EXECUTOR_ACTIVE_LIMIT )); then
+    waiting_detail="active limit reached before resuming review rework for $rework_task_id; $active_summary_text"
+    emit_log "waiting" "active limit reached before rework" "$rework_issue_number" "$rework_task_id" "$waiting_detail"
+    printf 'waiting: %s\n' "$waiting_detail"
+    exit 0
+  fi
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    emit_log "selected" "dry-run selected review rework" "$rework_issue_number" "$rework_task_id" "$rework_title"
+    printf 'selected rework task %s: %s\n' "$rework_task_id" "$rework_title"
+    exit 0
+  fi
+
+  task_json_path=$(harness_task_status_path "$rework_task_id")
+  repo_slug=$(jq -r '.repo_slug // ""' "$task_json_path")
+  branch=$(jq -r '.branch' "$task_json_path")
+  worktree=$(jq -r '.worktree' "$task_json_path")
+  pr_url=$(jq -r '.pr_url // ""' "$task_json_path")
+  rework_attempts=$(jq -r '.review_rework_attempts // 0' "$task_json_path")
+  rework_limit=$(jq -r '.review_rework_limit // 3' "$task_json_path")
+  claim_key=$(harness_claim_key "$repo_slug" "$rework_issue_number" "$rework_task_id")
+  harness_write_claim "$claim_key" "$repo_slug" "$rework_issue_number" "$rework_task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "in_progress"
+  harness_update_task_status "$rework_task_id" "in_progress" "automatic review rework attempt $rework_attempts of $rework_limit in progress" "$pr_url"
+  harness_record_stage_summary "$rework_task_id" "executor" "started" "Executor started automatic review rework attempt $rework_attempts of $rework_limit." "$pr_url"
+
+  if launch_worker_for_task "$task_json_path" "resumed automatic review rework"; then
     exit 0
   else
     exit $?
@@ -426,73 +541,8 @@ fi
 
 task_json_path=$(harness_task_status_path "$task_id")
 [[ -f "$task_json_path" ]] || harness_die "missing task.json for $task_id"
-
-worktree=$(jq -r '.worktree' "$task_json_path")
-worker_log="$HARNESS_LOG_DIR/$task_id-$(date -u +%Y%m%dT%H%M%SZ).log"
-finish_script="$(harness_repo_root)/scripts/task-finish"
-repo_slug=$(jq -r '.repo_slug // ""' "$task_json_path")
-claim_key=$(harness_claim_key "$repo_slug" "$issue_number" "$task_id")
-gh_token=""
-codex_env=()
-if harness_can_sync_github; then
-  gh_token="$(gh auth token 2>/dev/null || true)"
-fi
-if [[ -n "$gh_token" ]]; then
-  codex_env=(GH_TOKEN="$gh_token" GITHUB_TOKEN="$gh_token")
-fi
-
-emit_log "claimed" "claimed issue and launching Codex" "$issue_number" "$task_id" "$title"
-harness_update_claim_status "$claim_key" "in_progress" "executor running" "$worker_log"
 harness_record_stage_summary "$task_id" "executor" "started" "Executor started a Codex worker for the claimed task."
-
-worker_prompt=$(cat <<EOF
-Read .harness-session/codex/AGENTS.md, .harness-session/codex/TASK.md, and .harness-session/codex/PR_BODY.md from the current repository root. Follow them exactly and complete the task end-to-end.
-
-Important execution split:
-
-- You own code changes, verification, and a focused local git commit.
-- The parent harness process will handle push + PR creation after you exit if a local commit exists.
-- Only call $finish_script yourself when the task is blocked or when you need to record a terminal failure reason.
-- Do not spawn child agents or wait on other agents from this task worker.
-- Finish in one pass and exit promptly after your local work is done.
-
-If you cannot complete the task, record the blocker with task-finish before exit.
-EOF
-)
-
-worker_exit=0
-if (cd "$worktree" && harness_run_with_timeout "$HARNESS_EXECUTOR_TIMEOUT_SECONDS" env "${codex_env[@]}" codex exec --disable child_agents_md --full-auto "$worker_prompt") >"$worker_log" 2>&1; then
-  worker_exit=0
-else
-  worker_exit=$?
-fi
-
-harness_update_claim_status "$claim_key" "reconciling" "executor exited with code $worker_exit" "$worker_log" "$worker_exit"
-
-task_snapshot=$(task_snapshot_by_id "$task_id")
-status=$(printf '%s' "$task_snapshot" | jq -r '.status // "unknown"')
-pr_url=$(printf '%s' "$task_snapshot" | jq -r '.pr_url // ""')
-note=$(printf '%s' "$task_snapshot" | jq -r '.note // ""')
-
-case "$status" in
-  pr_open)
-    emit_log "success" "worker opened PR" "$issue_number" "$task_id" "$pr_url"
-    printf 'success: issue #%s -> PR %s\n' "$issue_number" "$pr_url"
-    exit 0
-    ;;
-  done)
-    emit_log "success" "task reached done state" "$issue_number" "$task_id" "${pr_url:-$note}"
-    printf 'success: issue #%s marked done\n' "$issue_number"
-    exit 0
-    ;;
-  blocked)
-    emit_log "blocked" "worker marked task blocked" "$issue_number" "$task_id" "$note"
-    printf 'blocked: issue #%s -> %s\n' "$issue_number" "$note"
-    exit 2
-    ;;
-esac
-
-if reconcile_task "$task_snapshot"; then
+if launch_worker_for_task "$task_json_path" "claimed issue and launching Codex"; then
   exit 0
 else
   exit $?

@@ -541,6 +541,55 @@ harness_task_field() {
   jq -r "$field" "$(harness_task_status_path "$task_id")"
 }
 
+harness_task_review_rework_attempts() {
+  local task_id
+  task_id="$1"
+  harness_task_field "$task_id" '.review_rework_attempts // 0'
+}
+
+harness_task_review_rework_limit() {
+  local task_id
+  task_id="$1"
+  harness_task_field "$task_id" '.review_rework_limit // 3'
+}
+
+harness_set_task_review_state() {
+  local task_id verdict rework_attempts status_file now had_lock
+  task_id="$1"
+  verdict="$2"
+  rework_attempts="${3:-}"
+
+  harness_load_project_env
+  harness_prepare_state
+  had_lock="${HARNESS_LOCK_HELD:-0}"
+  harness_acquire_lock
+  status_file=$(harness_task_status_path "$task_id")
+  if [[ ! -f "$status_file" ]]; then
+    if [[ "$had_lock" != "1" ]]; then
+      harness_release_lock
+    fi
+    return 0
+  fi
+
+  if [[ -z "$rework_attempts" ]]; then
+    rework_attempts=$(jq -r '.review_rework_attempts // 0' "$status_file")
+  fi
+
+  now=$(harness_now_utc)
+  jq \
+    --arg verdict "$verdict" \
+    --arg updated_at "$now" \
+    --argjson rework_attempts "$rework_attempts" '
+      .updated_at = $updated_at
+      | .last_review_verdict = $verdict
+      | .review_rework_attempts = $rework_attempts
+    ' "$status_file" >"$status_file.tmp"
+  mv "$status_file.tmp" "$status_file"
+  if [[ "$had_lock" != "1" ]]; then
+    harness_release_lock
+  fi
+}
+
 harness_find_next_task_by_status() {
   local status files_json
   status="$1"
@@ -801,6 +850,7 @@ harness_stage_status_id() {
     executor:reconciled_to_pr) printf 'executor_reconciled_to_pr\n' ;;
     executor:blocked) printf 'executor_blocked\n' ;;
     review:approved) printf 'review_approved\n' ;;
+    review:rework) printf 'review_rework\n' ;;
     review:rejected) printf 'review_rejected\n' ;;
     review:blocked) printf 'review_blocked\n' ;;
     prepare:passed) printf 'prepare_passed\n' ;;
@@ -825,6 +875,7 @@ harness_stage_label() {
     executor_reconciled_to_pr) printf 'executor reconciled to PR\n' ;;
     executor_blocked) printf 'executor blocked\n' ;;
     review_approved) printf 'review approved\n' ;;
+    review_rework) printf 'review rework\n' ;;
     review_rejected) printf 'review rejected\n' ;;
     review_blocked) printf 'review blocked\n' ;;
     prepare_passed) printf 'prepare passed\n' ;;
@@ -846,6 +897,9 @@ harness_stage_operator_action() {
   case "$stage_id" in
     executor_blocked)
       printf 'Inspect the worker outcome, then rerun or requeue the task.'
+      ;;
+    review_rework)
+      printf ''
       ;;
     review_rejected)
       printf 'Inspect the review findings, then revise the PR or close the task.'
@@ -1261,8 +1315,8 @@ harness_issue_rejected() {
   harness_ensure_status_labels "$repo"
   gh issue edit "$issue_number" -R "$repo" \
     --remove-label "$HARNESS_LABEL_ACTIVE" \
-    --remove-label "$HARNESS_LABEL_PR_OPEN" \
-    --add-label "$HARNESS_LABEL_BLOCKED" >/dev/null 2>&1 || true
+    --remove-label "$HARNESS_LABEL_BLOCKED" \
+    --add-label "$HARNESS_LABEL_PR_OPEN" >/dev/null 2>&1 || true
 
   harness_issue_comment "$repo" "$issue_number" \
     "Harness status update: rejected.\n\n- reason: $reason"
