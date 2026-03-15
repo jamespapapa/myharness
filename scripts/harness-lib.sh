@@ -57,8 +57,71 @@ harness_slugify() {
     | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
 }
 
+harness_project_manifest_path() {
+  local root
+  root=$(harness_repo_root)
+  printf '%s\n' "$root/.harness/project.yaml"
+}
+
+harness_project_manifest_query() {
+  local query="$1"
+  local manifest
+  manifest=$(harness_project_manifest_path)
+  [[ -f "$manifest" ]] || return 1
+  jq -er "$query" "$manifest"
+}
+
+harness_resolve_path() {
+  local root="$1"
+  local path="${2:-}"
+
+  [[ -n "$path" ]] || return 1
+
+  if [[ "$path" == /* ]]; then
+    printf '%s\n' "$path"
+    return 0
+  fi
+
+  printf '%s/%s\n' "$root" "$path"
+}
+
+harness_relative_path() {
+  local from="$1"
+  local to="$2"
+
+  python3 - "$from" "$to" <<'PY'
+import os, sys
+start = os.path.abspath(sys.argv[1])
+target = os.path.abspath(sys.argv[2])
+print(os.path.relpath(target, start=start))
+PY
+}
+
+harness_project_topology_summary() {
+  local manifest
+  manifest=$(harness_project_manifest_path)
+  [[ -f "$manifest" ]] || return 1
+
+  jq -r '
+    .project.topology as $topology |
+    [
+      "Topology:",
+      "- control tower: \($topology.control_tower.transport // "unknown") / \($topology.control_tower.channel_key // "unset")",
+      "- execution slots: \($topology.execution.slot_count // 0)",
+      ($topology.execution.channels[]? | "- execution slot \(.slot // 0): \(.transport // "unknown") / \(.channel_key // "unset")"),
+      "- runner mode: \($topology.runners.mode // "unknown")",
+      ($topology.runners.entries[]? | "- runner \(.id // "unknown"): clone_root=\(.clone_root // ".") worktree_root=\(.worktree_root // ".") manager_dir=\(.manager_dir // ".harness-manager/openclaw")"),
+      "- queue default label: \($topology.queue_policy.default_label // "unset")",
+      "- queue claim source: \($topology.queue_policy.claim_source // "unset")"
+    ] | .[]
+  ' "$manifest"
+}
+
 harness_load_project_env() {
   local root config parent base
+  local manifest_project_slug manifest_control_tower_key manifest_slot_count
+  local manifest_queue_label manifest_runner_mode manifest_worktree_root
+  local manifest_manager_dir
   root=$(harness_repo_root)
   config="$root/.harness/project.env"
   if [[ -f "$config" ]]; then
@@ -66,19 +129,30 @@ harness_load_project_env() {
     source "$config"
   fi
 
+  manifest_project_slug=$(harness_project_manifest_query '.project.slug // empty' 2>/dev/null || true)
+  manifest_control_tower_key=$(harness_project_manifest_query '.project.topology.control_tower.channel_key // empty' 2>/dev/null || true)
+  manifest_slot_count=$(harness_project_manifest_query '.project.topology.execution.slot_count // empty' 2>/dev/null || true)
+  manifest_queue_label=$(harness_project_manifest_query '.project.topology.queue_policy.default_label // empty' 2>/dev/null || true)
+  manifest_runner_mode=$(harness_project_manifest_query '.project.topology.runners.mode // empty' 2>/dev/null || true)
+  manifest_worktree_root=$(harness_project_manifest_query '.project.topology.runners.entries[0].worktree_root // empty' 2>/dev/null || true)
+  manifest_manager_dir=$(harness_project_manifest_query '.project.topology.runners.entries[0].manager_dir // empty' 2>/dev/null || true)
+
   parent=$(dirname "$root")
   base=$(basename "$root")
 
+  : "${HARNESS_PROJECT_MANIFEST_FILE:=$(harness_project_manifest_path)}"
+  : "${HARNESS_PROJECT_SLUG:=$manifest_project_slug}"
   : "${HARNESS_REPO_SLUG:=}"
   : "${HARNESS_BASE_BRANCH:=main}"
   : "${HARNESS_BRANCH_PREFIX:=fix/issue-}"
   : "${HARNESS_GENERIC_BRANCH_PREFIX:=task/}"
   : "${HARNESS_AGENT_DEFAULT:=codex}"
   : "${HARNESS_LOG_DIR:=$root/.harness/logs}"
-  : "${HARNESS_AUTONOMOUS_LABEL:=}"
+  : "${HARNESS_AUTONOMOUS_LABEL:=$manifest_queue_label}"
   : "${HARNESS_CRON_INTERVAL_MINUTES:=5}"
   : "${HARNESS_EXECUTOR_TIMEOUT_SECONDS:=240}"
-  : "${HARNESS_EXECUTOR_ACTIVE_LIMIT:=1}"
+  : "${HARNESS_EXECUTION_SLOT_COUNT:=${manifest_slot_count:-1}}"
+  : "${HARNESS_EXECUTOR_ACTIVE_LIMIT:=$HARNESS_EXECUTION_SLOT_COUNT}"
   : "${HARNESS_REVIEW_TIMEOUT_SECONDS:=180}"
   : "${HARNESS_PREPARE_TIMEOUT_SECONDS:=300}"
   : "${HARNESS_LAND_TIMEOUT_SECONDS:=120}"
@@ -86,6 +160,7 @@ harness_load_project_env() {
   : "${HARNESS_MERGE_METHOD:=squash}"
   : "${HARNESS_REQUIRE_GREEN_CHECKS:=0}"
   : "${HARNESS_CONTROL_ROOM_DISCORD_WEBHOOK_URL:=}"
+  : "${HARNESS_CONTROL_TOWER_CHANNEL_KEY:=$manifest_control_tower_key}"
   : "${HARNESS_JIRA_BASE_URL:=}"
   : "${HARNESS_JIRA_USER_EMAIL:=}"
   : "${HARNESS_JIRA_API_TOKEN:=}"
@@ -94,12 +169,13 @@ harness_load_project_env() {
   : "${HARNESS_LABEL_DONE:=harness:done}"
   : "${HARNESS_LABEL_BLOCKED:=harness:blocked}"
   : "${HARNESS_CLAIM_TTL_MINUTES:=240}"
-  : "${HARNESS_WORKTREE_ROOT:=$parent/$base-worktrees}"
+  : "${HARNESS_RUNNER_MODE:=${manifest_runner_mode:-single-runner}}"
+  : "${HARNESS_WORKTREE_ROOT:=$(harness_resolve_path "$root" "${manifest_worktree_root:-$parent/$base-worktrees}")}"
   : "${HARNESS_TASK_DIR:=$root/.harness/tasks}"
   : "${HARNESS_STATE_DIR:=$root/.harness/state}"
   : "${HARNESS_CLAIMS_FILE:=$HARNESS_STATE_DIR/claims.json}"
   : "${HARNESS_LOCK_DIR:=$HARNESS_STATE_DIR/.lock}"
-  : "${HARNESS_MANAGER_DIR:=$root/.harness-manager/openclaw}"
+  : "${HARNESS_MANAGER_DIR:=$(harness_resolve_path "$root" "${manifest_manager_dir:-.harness-manager/openclaw}")}"
 }
 
 harness_repo_slug() {

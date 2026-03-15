@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "project": {
+    "slug": "jamespapapa/myharness",
+    "topology": {
+      "control_tower": {
+        "transport": "discord",
+        "channel_key": "myharness-control-tower"
+      },
+      "execution": {
+        "slot_count": 1,
+        "channels": [
+          {
+            "slot": 1,
+            "transport": "discord",
+            "channel_key": "myharness-issue-dev-1"
+          }
+        ]
+      },
+      "runners": {
+        "mode": "single-runner",
+        "entries": [
+          {
+            "id": "primary",
+            "clone_root": ".",
+            "worktree_root": "../myharness-runner-worktrees",
+            "manager_dir": ".harness-manager/openclaw"
+          }
+        ]
+      },
+      "queue_policy": {
+        "claim_source": "control_tower",
+        "default_label": "Ready",
+        "advance_active_first": true
+      }
+    }
+  }
+}

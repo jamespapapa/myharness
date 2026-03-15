@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
+MANIFEST="$ROOT/.harness/project.yaml"
+
+[[ -f "$MANIFEST" ]] || {
+  printf 'missing manifest: %s\n' "$MANIFEST" >&2
+  exit 1
+}
+
+jq -e '
+  .project.topology as $topology
+  | .schema_version == 1
+  and (.project.slug | type == "string" and length > 0)
+  and ($topology.control_tower.transport | type == "string" and length > 0)
+  and ($topology.control_tower.channel_key | type == "string" and length > 0)
+  and ($topology.execution.slot_count | type == "number" and . >= 1 and floor == .)
+  and ($topology.execution.channels | type == "array" and length == $topology.execution.slot_count)
+  and (all($topology.execution.channels[]?;
+    (.slot | type == "number" and . >= 1 and floor == .)
+    and (.transport | type == "string" and length > 0)
+    and (.channel_key | type == "string" and length > 0)
+  ))
+  and (($topology.execution.channels | map(.slot) | unique | length) == $topology.execution.slot_count)
+  and (([$topology.control_tower.channel_key] + ($topology.execution.channels | map(.channel_key))) | unique | length == ($topology.execution.slot_count + 1))
+  and ($topology.runners.mode == "single-runner" or $topology.runners.mode == "multi-runner")
+  and ($topology.runners.entries | type == "array" and length >= 1)
+  and (if $topology.runners.mode == "single-runner"
+       then ($topology.runners.entries | length) == 1
+       else ($topology.runners.entries | length) >= 1
+       end)
+  and (all($topology.runners.entries[]?;
+    (.id | type == "string" and length > 0)
+    and (.clone_root | type == "string" and length > 0)
+    and (.worktree_root | type == "string" and length > 0)
+    and (.manager_dir | type == "string" and length > 0)
+  ))
+  and ($topology.queue_policy.claim_source == "control_tower")
+  and ($topology.queue_policy.default_label | type == "string" and length > 0)
+  and ($topology.queue_policy.advance_active_first | type == "boolean")
+' "$MANIFEST" >/dev/null
+
+printf 'check-project-manifest passed\n'

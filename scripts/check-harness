@@ -9,6 +9,8 @@ cd "$root"
 scripts=(
   scripts/harness-lib.sh
   scripts/check-harness
+  scripts/check-project-manifest
+  scripts/check-manager-workspace
   scripts/check-control-room-notifications
   scripts/check-stage-reporting
   scripts/check-task-control-room-once
@@ -30,6 +32,8 @@ scripts=(
 )
 
 bash -n "${scripts[@]}"
+scripts/check-project-manifest
+scripts/check-manager-workspace
 scripts/check-control-room-notifications
 scripts/check-stage-reporting
 scripts/check-task-control-room-once
