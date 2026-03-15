@@ -70,12 +70,7 @@ resolve_base_ref() {
 collect_changed_paths() {
   local merge_base="$1"
 
-  {
-    git diff --name-only "$merge_base...HEAD"
-    git diff --name-only --cached
-    git diff --name-only
-    git ls-files --others --exclude-standard
-  } | awk 'NF' | sort -u
+  git diff --name-only "$merge_base...HEAD" | awk 'NF' | sort -u
 }
 
 sync_metadata_is_valid() {
@@ -353,11 +348,26 @@ EOF
   assert_contains "$output" "invalid sync metadata" "invalid sync metadata should be reported"
 }
 
+scenario_untracked_sync_owned_local_dirt_is_ignored() {
+  local fixture_dir repo_dir output_file status
+  fixture_dir="$TMP_DIR/untracked-sync-owned-local-dirt"
+  rm -rf "$fixture_dir"
+
+  repo_dir=$(setup_fixture_repo "$fixture_dir")
+  printf '\nlocal dirt only\n' >>"$repo_dir/ops/HARNESS_SYNC.md"
+
+  output_file="$fixture_dir/output.txt"
+  status=$(run_fixture_check "$repo_dir" "$output_file")
+  assert_eq "$status" "0" "untracked local dirt should not affect branch-diff-based sync ownership checks"
+  assert_contains "$(cat "$output_file")" "check-sync-owned-paths passed" "untracked local dirt should be ignored"
+}
+
 run_self_test() {
   scenario_project_owned_paths_pass
   scenario_core_owned_paths_fail_without_sync_metadata
   scenario_core_owned_paths_pass_with_sync_metadata
   scenario_invalid_sync_metadata_fails
+  scenario_untracked_sync_owned_local_dirt_is_ignored
   printf 'check-sync-owned-paths self-test passed\n'
 }
 
