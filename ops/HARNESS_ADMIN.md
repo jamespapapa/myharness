@@ -55,8 +55,9 @@ Before you trust autonomous merge on a real repository:
 1. Update [.harness/prepare.commands](/Users/jules/Desktop/work/myharness/.harness/prepare.commands) with the repo's real `lint`, `test`, `build`, and invariant commands.
 2. Set `HARNESS_REQUIRE_GREEN_CHECKS="1"` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) if GitHub checks must be green before merge.
 3. Confirm the queue gate you want in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) (current default: `HARNESS_AUTONOMOUS_LABEL="Ready"`).
-4. Add GitHub issue forms, or require all intake to flow through `scripts/task-intake`.
-5. Decide how many executor workers you want, then add the corresponding cron jobs.
+4. If you want Jira comments, set `HARNESS_JIRA_BASE_URL`, `HARNESS_JIRA_USER_EMAIL`, and `HARNESS_JIRA_API_TOKEN` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env).
+5. Add GitHub issue forms, or require all intake to flow through `scripts/task-intake`.
+6. Decide how many executor workers you want, then add the corresponding cron jobs.
 
 ## Manager Session
 
@@ -127,6 +128,18 @@ If you are creating issues manually in GitHub, keep the body structured so the w
 ## Done Conditions
 
 - What proof or behavior is required before merge?
+```
+
+If the work should mirror into Jira, add one explicit line anywhere in the body:
+
+```md
+Jira: ABC-123
+```
+
+You can also use a browse URL instead:
+
+```md
+Jira: https://jira.example.test/browse/ABC-123
 ```
 
 This seed repo does not yet enforce that contract through `.github/ISSUE_TEMPLATE/`, so use `scripts/task-intake` or apply this template manually.
@@ -205,6 +218,68 @@ The harness mirrors task state with four labels:
 These are created automatically on first use if they do not already exist.
 
 Claims are also tracked locally in `.harness/state/claims.json`. `task-next` prunes stale claims older than `HARNESS_CLAIM_TTL_MINUTES`.
+
+## Stage Summaries
+
+Each task record now keeps a machine-readable stage history in `.harness/tasks/<task-id>/task.json`:
+
+- `last_stage_summary`: most recent stage transition
+- `stage_summaries`: append-only history of stage transitions for the task
+
+The stable `stage_id` values are:
+
+- `claim_started`
+- `executor_started`
+- `executor_reconciled_to_pr`
+- `executor_blocked`
+- `review_approved`
+- `review_rejected`
+- `review_blocked`
+- `prepare_passed`
+- `prepare_failed`
+- `prepare_blocked`
+- `land_merged`
+- `land_failed`
+- `land_blocked`
+
+Each summary entry records:
+
+- task and issue reference
+- current stage
+- what actually happened
+- PR link when available
+- blocked reason and operator action when relevant
+
+These summaries are intended to be the reusable local reporting surface for the control-room and future integrations.
+
+## Jira Comment Sync
+
+Jira sync is opt-in and configuration-driven. The harness only posts Jira comments when all of these are true:
+
+1. `.harness/project.env` sets `HARNESS_JIRA_BASE_URL`
+2. `.harness/project.env` sets `HARNESS_JIRA_USER_EMAIL`
+3. `.harness/project.env` sets `HARNESS_JIRA_API_TOKEN`
+4. the task or issue body contains an explicit Jira link line such as `Jira: ABC-123`
+
+When enabled, the harness posts concise comments for these major transitions:
+
+- claim started
+- executor started
+- executor reconciled to PR
+- review approved / rejected / blocked
+- prepare passed / failed / blocked
+- land merged / failed / blocked
+
+Jira comment format:
+
+- task reference
+- GitHub issue reference
+- current stage label
+- what happened in that stage
+- PR URL when present
+- blocked reason and expected operator action when relevant
+
+The Jira comment body intentionally avoids raw local filesystem paths or full local logs.
 
 ## Autonomous Mode
 

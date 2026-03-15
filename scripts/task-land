@@ -53,6 +53,7 @@ cleanup_land() {
   current_status=$(harness_task_field "$task_id" '.status // ""' 2>/dev/null || true)
   if [[ "$current_status" == "landing" ]]; then
     harness_update_task_status "$task_id" "land_failed" "land script aborted unexpectedly" "${pr_url:-}"
+    harness_record_stage_summary "$task_id" "land" "blocked" "Land aborted before the PR could be merged." "${pr_url:-}" "land script aborted unexpectedly"
     harness_control_room_notify "blocked" "land" "$task_id" "${issue_number:-}" "${repo_slug:-}" "land script aborted unexpectedly"
   fi
 }
@@ -148,6 +149,7 @@ if [[ "$pr_state" == "MERGED" ]]; then
     "$SCRIPT_DIR/task-finish" --issue "$issue_number" --merged --pr "$pr_url" >/dev/null
   else
     harness_update_task_status "$task_id" "done" "merged externally" "$pr_url"
+    harness_record_stage_summary "$task_id" "land" "merged" "Land detected that the PR was already merged." "$pr_url"
   fi
   printf 'already merged: %s\n' "$task_id"
   exit 0
@@ -173,6 +175,7 @@ if [[ "$HARNESS_REQUIRE_GREEN_CHECKS" == "1" ]]; then
 
   if harness_pr_checks_any_failed "$pr_json"; then
     harness_update_task_status "$task_id" "land_failed" "remote status checks failed" "$pr_url"
+    harness_record_stage_summary "$task_id" "land" "blocked" "Land could not merge because the PR checks failed." "$pr_url" "remote status checks failed"
     harness_control_room_notify "blocked" "land" "$task_id" "$issue_number" "$repo_slug" "remote status checks failed"
     if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
       harness_issue_blocked "$repo_slug" "$issue_number" "land blocked for PR #$pr_number because remote status checks failed"
@@ -223,6 +226,7 @@ if [[ "$land_exit" -ne 0 ]]; then
     land_reason="gh pr merge failed"
   fi
   harness_update_task_status "$task_id" "land_failed" "$land_reason" "$pr_url"
+  harness_record_stage_summary "$task_id" "land" "failed" "Land could not merge the PR." "$pr_url" "$land_reason"
   harness_control_room_notify "blocked" "land" "$task_id" "$issue_number" "$repo_slug" "$land_reason"
   if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
     harness_issue_blocked "$repo_slug" "$issue_number" "land failed for PR #$pr_number: $land_reason"
@@ -238,6 +242,7 @@ if [[ -n "$issue_number" ]]; then
   "$SCRIPT_DIR/task-finish" --issue "$issue_number" --merged --pr "$pr_url" >/dev/null
 else
   harness_update_task_status "$task_id" "done" "merged" "$pr_url"
+  harness_record_stage_summary "$task_id" "land" "merged" "Land merged the PR." "$pr_url"
 fi
 
 printf 'merged: %s\n' "$task_id"

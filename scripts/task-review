@@ -16,6 +16,7 @@ cleanup_review() {
   current_status=$(harness_task_field "$task_id" '.status // ""' 2>/dev/null || true)
   if [[ "$current_status" == "reviewing" ]]; then
     harness_update_task_status "$task_id" "review_failed" "review script aborted unexpectedly" "${pr_url:-}"
+    harness_record_stage_summary "$task_id" "review" "blocked" "Review aborted before producing a final verdict." "${pr_url:-}" "review script aborted unexpectedly"
     harness_control_room_notify "blocked" "review" "$task_id" "${issue_number:-}" "${repo_slug:-}" "review script aborted unexpectedly"
   fi
 }
@@ -202,6 +203,7 @@ if [[ "$review_exit" -ne 0 ]]; then
     review_reason="review runtime failed; see $review_log"
   fi
   harness_update_task_status "$task_id" "review_failed" "$review_reason" "$pr_url"
+  harness_record_stage_summary "$task_id" "review" "blocked" "Review could not produce a valid artifact." "$pr_url" "$review_reason"
   harness_control_room_notify "blocked" "review" "$task_id" "$issue_number" "$repo_slug" "$review_reason"
   if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
     harness_issue_blocked "$repo_slug" "$issue_number" "$review_reason"
@@ -233,6 +235,7 @@ fi
 case "$verdict" in
   approved)
     harness_update_task_status "$task_id" "reviewed" "$summary" "$pr_url"
+    harness_record_stage_summary "$task_id" "review" "approved" "Review approved PR #$pr_number at head $head_sha." "$pr_url"
     if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
       harness_issue_comment "$repo_slug" "$issue_number" "Harness review approved for PR #$pr_number at head \`$head_sha\`."
     fi
@@ -242,6 +245,7 @@ case "$verdict" in
     harness_update_task_status "$task_id" "review_failed" "$summary" "$pr_url"
     reject_reason="$summary"
     [[ -n "$reject_reason" ]] || reject_reason="review rejected for PR #$pr_number"
+    harness_record_stage_summary "$task_id" "review" "rejected" "Review rejected PR #$pr_number at head $head_sha." "$pr_url" "$reject_reason"
     harness_control_room_notify "rejected" "review" "$task_id" "$issue_number" "$repo_slug" "$reject_reason"
     if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
       harness_issue_rejected "$repo_slug" "$issue_number" "$reject_reason"
@@ -251,6 +255,7 @@ case "$verdict" in
     ;;
   *)
     harness_update_task_status "$task_id" "review_failed" "invalid review verdict: $verdict" "$pr_url"
+    harness_record_stage_summary "$task_id" "review" "blocked" "Review produced an invalid verdict payload." "$pr_url" "invalid review verdict: $verdict"
     harness_die "invalid review verdict for $task_id: $verdict"
     ;;
 esac

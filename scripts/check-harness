@@ -10,6 +10,7 @@ scripts=(
   scripts/harness-lib.sh
   scripts/check-harness
   scripts/check-control-room-notifications
+  scripts/check-stage-reporting
   scripts/check-task-control-room-once
   scripts/check-task-run-once
   scripts/openclaw-manager-setup
@@ -30,6 +31,7 @@ scripts=(
 
 bash -n "${scripts[@]}"
 scripts/check-control-room-notifications
+scripts/check-stage-reporting
 scripts/check-task-control-room-once
 scripts/check-task-run-once
 printf 'check-harness passed\n'
