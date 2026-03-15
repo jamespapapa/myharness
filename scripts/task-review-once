@@ -51,7 +51,7 @@ if ! output=$("$SCRIPT_DIR/task-review" --task-id "$task_id" 2>&1); then
     exit 0
   fi
   status=$(harness_task_field "$task_id" '.status // ""' 2>/dev/null || true)
-  if [[ "$status" == "review_failed" || "$status" == "blocked" ]]; then
+  if [[ "$status" == "blocked" ]]; then
     detail="review lane blocked $task_id; $output"
     emit_log "blocked" "$task_id" "$detail"
     printf 'blocked: %s\n' "$detail"
@@ -67,6 +67,16 @@ status=$(harness_task_field "$task_id" '.status // ""')
 case "$status" in
   reviewed)
     detail="review lane approved $task_id"
+    emit_log "success" "$task_id" "$detail"
+    printf 'success: %s\n' "$detail"
+    ;;
+  rework)
+    detail="review lane queued rework for $task_id; $output"
+    emit_log "success" "$task_id" "$detail"
+    printf 'success: %s\n' "$detail"
+    ;;
+  rejected)
+    detail="review lane rejected $task_id; $output"
     emit_log "success" "$task_id" "$detail"
     printf 'success: %s\n' "$detail"
     ;;

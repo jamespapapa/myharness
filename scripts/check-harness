@@ -34,6 +34,7 @@ scripts=(
   scripts/check-project-manifest
   scripts/check-manager-workspace
   scripts/check-control-room-notifications
+  scripts/check-review-outcomes
   scripts/check-stage-reporting
   scripts/check-task-control-room-once
   scripts/check-task-run-once
@@ -61,6 +62,7 @@ scripts/check-doc-coverage --self-test
 scripts/check-project-manifest
 scripts/check-manager-workspace
 scripts/check-control-room-notifications
+scripts/check-review-outcomes
 scripts/check-stage-reporting
 scripts/check-task-control-room-once
 scripts/check-task-run-once

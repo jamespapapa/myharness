@@ -224,7 +224,7 @@ scripts/task-finish --issue 123 --merged --pr https://github.com/owner/repo/pull
 
 ## GitHub State Model
 
-The harness mirrors task state with four labels:
+The harness mirrors queue state with four GitHub labels:
 
 - `harness:in-progress`
 - `harness:pr-open`
@@ -234,6 +234,20 @@ The harness mirrors task state with four labels:
 These are created automatically on first use if they do not already exist.
 
 Claims are also tracked locally in `.harness/state/claims.json`. `task-next` prunes stale claims older than `HARNESS_CLAIM_TTL_MINUTES`.
+
+Review outcomes use additional repo-local task states in `.harness/tasks/<task-id>/task.json`:
+
+- `reviewed`: review approved and prepare may run
+- `rework`: retryable review findings; executor should repair the same task / PR branch automatically
+- `rejected`: terminal invalid attempt; do not escalate and do not auto-retry
+- `blocked`: human attention or an external decision is required
+
+Each task record also keeps:
+
+- `review_rework_attempts`: how many automatic review-repair loops have already been used
+- `review_rework_limit`: the retry cap, currently `3`
+
+When review returns `rework`, the control room routes that task back to executor before claiming a new issue. If review still returns `rework` on the third attempt, the task is converted to `blocked` and escalated.
 
 ## Stage Summaries
 
@@ -249,6 +263,7 @@ The stable `stage_id` values are:
 - `executor_reconciled_to_pr`
 - `executor_blocked`
 - `review_approved`
+- `review_rework`
 - `review_rejected`
 - `review_blocked`
 - `prepare_passed`
@@ -282,7 +297,7 @@ When enabled, the harness posts concise comments for these major transitions:
 - claim started
 - executor started
 - executor reconciled to PR
-- review approved / rejected / blocked
+- review approved / rework / rejected / blocked
 - prepare passed / failed / blocked
 - land merged / failed / blocked
 
@@ -310,6 +325,7 @@ That one command performs one repo wake tick:
 - advance `prepared` work through land first,
 - otherwise advance `reviewed` work through prepare,
 - otherwise advance `pr_open` work through review,
+- otherwise resume one queued `rework` task on its existing branch,
 - otherwise run executor reconcile/claim logic,
 - log one JSONL result line,
 - exit.
@@ -317,6 +333,7 @@ That one command performs one repo wake tick:
 The executor portion still behaves like this when reached:
 
 - reconcile one stale `in_progress` executor task first when needed,
+- resume one queued `rework` task before claiming new issue work,
 - pick one eligible issue,
 - only claim it if the active executor limit still has capacity,
 - create the worktree and Codex session,
@@ -356,6 +373,7 @@ scripts/task-land-once
 Those lanes consume local task states in order:
 
 - `pr_open` -> review
+- `rework` -> executor repair on the same task / PR branch
 - `reviewed` -> prepare
 - `prepared` -> land
 
