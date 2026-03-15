@@ -57,6 +57,8 @@ The human manager should spend time deciding scope and priority, not hand-carryi
 - `HARNESS_INTEGRATION_BRANCH` is the default source branch for new issue worktrees and the default PR target for issue work.
 - `HARNESS_RELEASE_BRANCH` stays separate for later promotion from the integration branch into release.
 - `HARNESS_BASE_BRANCH` remains a compatibility alias and resolves to the integration branch unless an operator overrides it explicitly.
+- When `task-land` merges an issue PR into `HARNESS_INTEGRATION_BRANCH`, the harness adds that issue to the active dev batch in `.harness/state/release-batches.json`.
+- When `task-land` merges a promotion PR whose head is `HARNESS_INTEGRATION_BRANCH` and base is `HARNESS_RELEASE_BRANCH`, the harness closes the active dev batch and stamps every shipped issue with release metadata.
 
 ## Production Checklist
 
@@ -250,16 +252,61 @@ scripts/task-finish --issue 123 --merged --pr https://github.com/owner/repo/pull
 
 ## GitHub State Model
 
-The harness mirrors queue state with four GitHub labels:
+The harness mirrors queue state with four workflow labels:
 
 - `harness:in-progress`
 - `harness:pr-open`
 - `harness:blocked`
 - `harness:done`
 
-These are created automatically on first use if they do not already exist.
+Release tracking adds two more labels:
+
+- `harness:in-dev-batch`
+- `harness:released`
+
+All six labels are created automatically on first use if they do not already exist.
 
 Claims are also tracked locally in `.harness/state/claims.json`. `task-next` prunes stale claims older than `HARNESS_CLAIM_TTL_MINUTES`.
+
+Release batches are tracked locally in `.harness/state/release-batches.json`.
+
+That file keeps:
+
+- `active_batch_id`: the dev batch currently accumulating merged issue work
+- `batches[]`: append-only batch records with issue membership, merge window, and later release promotion metadata
+- `window_start` / `window_end`: the date window represented by the current or released dev train
+- `released_at`, `release_pr_url`, and `release_merge_sha`: the promotion stamp recorded when `dev` lands on `main`
+
+Issue sync behavior:
+
+- issue PR merged to `dev`: add `harness:in-dev-batch` and post a machine-readable `dev_batch_joined` comment payload
+- `dev` promoted to `main`: remove `harness:in-dev-batch`, add `harness:released`, and post a machine-readable `released_to_main` comment payload on each shipped issue
+
+Inspect the active batch:
+
+```bash
+jq '
+  .active_batch_id as $batch_id
+  | .batches[]
+  | select(.id == $batch_id)
+' .harness/state/release-batches.json
+```
+
+Inspect released batches:
+
+```bash
+jq '
+  .batches[]
+  | select(.status == "released")
+  | {
+      id,
+      released_at,
+      window_start,
+      window_end,
+      issues: [.issues[].issue_number]
+    }
+' .harness/state/release-batches.json
+```
 
 Review outcomes use additional repo-local task states in `.harness/tasks/<task-id>/task.json`:
 

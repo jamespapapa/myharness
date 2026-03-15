@@ -138,12 +138,20 @@ prepared_head_sha=$(jq -r '.prepared_head_sha' "$prep_json")
 pr_json=$(harness_fetch_pr_json "$pr_url")
 pr_number=$(printf '%s' "$pr_json" | jq -r '.number')
 pr_state=$(printf '%s' "$pr_json" | jq -r '.state')
+pr_base_ref=$(printf '%s' "$pr_json" | jq -r '.baseRefName')
+pr_head_ref=$(printf '%s' "$pr_json" | jq -r '.headRefName')
 current_base_sha=$(printf '%s' "$pr_json" | jq -r '.baseRefOid')
 current_head_sha=$(printf '%s' "$pr_json" | jq -r '.headRefOid')
+pr_merged_at=$(printf '%s' "$pr_json" | jq -r '.mergedAt // ""')
 
 if [[ "$pr_state" == "MERGED" ]]; then
   merged_pr_json=$(gh pr view "$pr_url" --json number,url,state,mergeCommit)
   merge_sha=$(printf '%s' "$merged_pr_json" | jq -r '.mergeCommit.oid // ""')
+  merged_at="$pr_merged_at"
+  if [[ -z "$merged_at" || "$merged_at" == "null" ]]; then
+    merged_at=$(harness_now_utc)
+  fi
+  harness_record_release_metadata_for_pr "$task_id" "$issue_number" "$repo_slug" "$pr_number" "$pr_url" "$pr_base_ref" "$pr_head_ref" "$merge_sha" "$merged_at"
   write_land_artifacts "$merge_sha"
   if [[ -n "$issue_number" ]]; then
     "$SCRIPT_DIR/task-finish" --issue "$issue_number" --merged --pr "$pr_url" >/dev/null
@@ -210,6 +218,11 @@ if [[ "$land_exit" -ne 0 ]]; then
   merged_pr_json=$(gh pr view "$pr_url" --json number,url,state,mergeCommit 2>/dev/null || true)
   if [[ -n "$merged_pr_json" ]] && [[ "$(printf '%s' "$merged_pr_json" | jq -r '.state // ""')" == "MERGED" ]]; then
     merge_sha=$(printf '%s' "$merged_pr_json" | jq -r '.mergeCommit.oid // ""')
+    merged_at="$pr_merged_at"
+    if [[ -z "$merged_at" || "$merged_at" == "null" ]]; then
+      merged_at=$(harness_now_utc)
+    fi
+    harness_record_release_metadata_for_pr "$task_id" "$issue_number" "$repo_slug" "$pr_number" "$pr_url" "$pr_base_ref" "$pr_head_ref" "$merge_sha" "$merged_at"
     write_land_artifacts "$merge_sha"
     if [[ -n "$issue_number" ]]; then
       "$SCRIPT_DIR/task-finish" --issue "$issue_number" --merged --pr "$pr_url" >/dev/null
@@ -236,6 +249,7 @@ fi
 
 merged_pr_json=$(harness_run_with_timeout "$HARNESS_LAND_TIMEOUT_SECONDS" gh pr view "$pr_url" --json number,url,state,mergeCommit)
 merge_sha=$(printf '%s' "$merged_pr_json" | jq -r '.mergeCommit.oid // ""')
+harness_record_release_metadata_for_pr "$task_id" "$issue_number" "$repo_slug" "$pr_number" "$pr_url" "$pr_base_ref" "$pr_head_ref" "$merge_sha" "$(harness_now_utc)"
 write_land_artifacts "$merge_sha"
 
 if [[ -n "$issue_number" ]]; then

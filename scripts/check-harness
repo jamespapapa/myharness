@@ -36,6 +36,7 @@ scripts=(
   scripts/check-sync-request
   scripts/check-project-agents-contract
   scripts/check-control-room-notifications
+  scripts/check-release-tracking
   scripts/check-review-outcomes
   scripts/check-stage-reporting
   scripts/check-task-control-room-once
@@ -67,6 +68,7 @@ scripts/check-manager-workspace
 scripts/check-sync-request
 scripts/check-project-agents-contract --self-test
 scripts/check-control-room-notifications
+scripts/check-release-tracking
 scripts/check-review-outcomes
 scripts/check-stage-reporting
 scripts/check-task-control-room-once

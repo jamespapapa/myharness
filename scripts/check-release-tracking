@@ -1,0 +1,425 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SOURCE_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
+
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+write_mock_binaries() {
+  local bin_dir="$1"
+
+  mkdir -p "$bin_dir"
+
+  cat >"$bin_dir/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_dir="${HARNESS_MOCK_GH_STATE_DIR:?}"
+repo_slug="${HARNESS_MOCK_GH_REPO:-example/test-harness}"
+comments_log="${HARNESS_MOCK_GH_COMMENTS_LOG:?}"
+
+issue_path() {
+  printf '%s/issue-%s.json\n' "$state_dir" "$1"
+}
+
+pr_path() {
+  printf '%s/pr-%s.json\n' "$state_dir" "$1"
+}
+
+update_issue_labels() {
+  local issue_number="$1"
+  shift
+  local issue_file labels_json label
+  local -a add_labels=() remove_labels=()
+
+  issue_file=$(issue_path "$issue_number")
+  labels_json=$(jq -c '[.labels[].name]' "$issue_file")
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --add-label)
+        add_labels+=("${2:-}")
+        shift 2
+        ;;
+      --remove-label)
+        remove_labels+=("${2:-}")
+        shift 2
+        ;;
+      -R|--repo|--add-assignee)
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  for label in "${remove_labels[@]-}"; do
+    [[ -n "$label" ]] || continue
+    labels_json=$(printf '%s' "$labels_json" | jq --arg label "$label" 'map(select(. != $label))')
+  done
+  for label in "${add_labels[@]-}"; do
+    [[ -n "$label" ]] || continue
+    labels_json=$(printf '%s' "$labels_json" | jq --arg label "$label" 'if index($label) then . else . + [$label] end')
+  done
+
+  jq --argjson labels "$labels_json" '.labels = ($labels | map({name:.}))' "$issue_file" >"$issue_file.tmp"
+  mv "$issue_file.tmp" "$issue_file"
+}
+
+record_issue_comment() {
+  local issue_number="$1"
+  shift
+  local body=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --body)
+        body="${2:-}"
+        shift 2
+        ;;
+      -R|--repo)
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  jq -nc --argjson issue_number "$issue_number" --arg body "$body" '{issue_number:$issue_number,body:$body}' >>"$comments_log"
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  auth)
+    case "${1:-}" in
+      status)
+        exit 0
+        ;;
+      token)
+        printf 'mock-token\n'
+        exit 0
+        ;;
+    esac
+    ;;
+  repo)
+    if [[ "${1:-}" == "view" ]]; then
+      printf '%s\n' "$repo_slug"
+      exit 0
+    fi
+    ;;
+  issue)
+    case "${1:-}" in
+      view)
+        issue_number="${2:?}"
+        cat "$(issue_path "$issue_number")"
+        exit 0
+        ;;
+      edit)
+        shift
+        issue_number="${1:?}"
+        shift
+        update_issue_labels "$issue_number" "$@"
+        exit 0
+        ;;
+      comment)
+        shift
+        issue_number="${1:?}"
+        shift
+        record_issue_comment "$issue_number" "$@"
+        exit 0
+        ;;
+    esac
+    ;;
+  label)
+    case "${1:-}" in
+      list|create)
+        exit 0
+        ;;
+    esac
+    ;;
+  pr)
+    case "${1:-}" in
+      view)
+        pr_ref="${2:?}"
+        pr_number="${pr_ref##*/}"
+        cat "$(pr_path "$pr_number")"
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+
+printf 'unsupported gh invocation: %s %s\n' "$cmd" "$*" >&2
+exit 1
+EOF
+  chmod +x "$bin_dir/gh"
+}
+
+assert_eq() {
+  local actual="$1"
+  local expected="$2"
+  local message="$3"
+
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'assert_eq failed: %s\nexpected: %s\nactual:   %s\n' "$message" "$expected" "$actual" >&2
+    exit 1
+  fi
+}
+
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local message="$3"
+
+  if [[ "$haystack" != *"$needle"* ]]; then
+    printf 'assert_contains failed: %s\nneedle: %s\nhaystack: %s\n' "$message" "$needle" "$haystack" >&2
+    exit 1
+  fi
+}
+
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local message="$3"
+
+  if [[ "$haystack" == *"$needle"* ]]; then
+    printf 'assert_not_contains failed: %s\nneedle: %s\nhaystack: %s\n' "$message" "$needle" "$haystack" >&2
+    exit 1
+  fi
+}
+
+write_issue_state() {
+  local issue_number="$1"
+
+  cat >"$MOCK_STATE_DIR/issue-$issue_number.json" <<EOF
+{
+  "number": $issue_number,
+  "title": "Synthetic issue $issue_number",
+  "body": "",
+  "url": "https://example.test/issues/$issue_number",
+  "labels": [],
+  "assignees": [],
+  "state": "OPEN"
+}
+EOF
+}
+
+write_pr_state() {
+  local pr_number="$1"
+  local title="$2"
+  local url="$3"
+  local state="$4"
+  local base_ref="$5"
+  local base_sha="$6"
+  local head_ref="$7"
+  local head_sha="$8"
+  local merged_at="$9"
+  local merge_sha="${10}"
+
+  cat >"$MOCK_STATE_DIR/pr-$pr_number.json" <<EOF
+{
+  "number": $pr_number,
+  "title": $(printf '%s' "$title" | jq -Rs .),
+  "url": $(printf '%s' "$url" | jq -Rs .),
+  "state": $(printf '%s' "$state" | jq -Rs .),
+  "isDraft": false,
+  "baseRefName": $(printf '%s' "$base_ref" | jq -Rs .),
+  "baseRefOid": $(printf '%s' "$base_sha" | jq -Rs .),
+  "headRefName": $(printf '%s' "$head_ref" | jq -Rs .),
+  "headRefOid": $(printf '%s' "$head_sha" | jq -Rs .),
+  "mergedAt": $(printf '%s' "$merged_at" | jq -Rs .),
+  "mergeCommit": {"oid": $(printf '%s' "$merge_sha" | jq -Rs .)},
+  "statusCheckRollup": [],
+  "files": [],
+  "mergeStateStatus": "CLEAN"
+}
+EOF
+}
+
+write_task_fixture() {
+  local task_id="$1"
+  local issue_number="$2"
+  local repo_slug="$3"
+  local pr_number="$4"
+  local pr_url="$5"
+  local base_branch="$6"
+  local reviewed_base_sha="$7"
+  local reviewed_head_sha="$8"
+
+  mkdir -p "$REPO_DIR/.harness/tasks/$task_id" \
+    "$REPO_DIR/artifacts/reviews/$task_id" \
+    "$REPO_DIR/artifacts/prep/$task_id"
+
+  cat >"$REPO_DIR/.harness/tasks/$task_id/task.json" <<EOF
+{
+  "task_id": $(printf '%s' "$task_id" | jq -Rs .),
+  "issue_number": $issue_number,
+  "title": "Synthetic task $task_id",
+  "issue_body": "",
+  "issue_url": "",
+  "repo_slug": $(printf '%s' "$repo_slug" | jq -Rs .),
+  "branch": "synthetic/$task_id",
+  "base_branch": $(printf '%s' "$base_branch" | jq -Rs .),
+  "base_remote_ref": "origin/$base_branch",
+  "base_sha": $(printf '%s' "$reviewed_base_sha" | jq -Rs .),
+  "worktree": "",
+  "status": "prepared",
+  "review_rework_attempts": 0,
+  "review_rework_limit": 3,
+  "last_review_verdict": "approved",
+  "pr_url": $(printf '%s' "$pr_url" | jq -Rs .),
+  "created_at": "2026-03-15T00:00:00Z",
+  "updated_at": "2026-03-15T00:00:00Z",
+  "stage_summaries": []
+}
+EOF
+
+  cat >"$REPO_DIR/artifacts/reviews/$task_id/review.json" <<EOF
+{
+  "task_id": $(printf '%s' "$task_id" | jq -Rs .),
+  "issue_number": $issue_number,
+  "pr_number": $pr_number,
+  "pr_url": $(printf '%s' "$pr_url" | jq -Rs .),
+  "verdict": "approved",
+  "reviewed_base_sha": $(printf '%s' "$reviewed_base_sha" | jq -Rs .),
+  "reviewed_head_sha": $(printf '%s' "$reviewed_head_sha" | jq -Rs .)
+}
+EOF
+
+  cat >"$REPO_DIR/artifacts/prep/$task_id/gates.json" <<EOF
+{
+  "task_id": $(printf '%s' "$task_id" | jq -Rs .),
+  "issue_number": $issue_number,
+  "pr_number": $pr_number,
+  "pr_url": $(printf '%s' "$pr_url" | jq -Rs .),
+  "status": "passed",
+  "prepared_base_sha": $(printf '%s' "$reviewed_base_sha" | jq -Rs .),
+  "prepared_head_sha": $(printf '%s' "$reviewed_head_sha" | jq -Rs .)
+}
+EOF
+}
+
+setup_fixture() {
+  FIXTURE_DIR="$TMP_DIR/release-tracking"
+  REPO_DIR="$FIXTURE_DIR/repo"
+  MOCK_STATE_DIR="$FIXTURE_DIR/mock-gh"
+  BIN_DIR="$FIXTURE_DIR/bin"
+  COMMENTS_LOG="$FIXTURE_DIR/comments.jsonl"
+
+  mkdir -p "$FIXTURE_DIR" "$MOCK_STATE_DIR"
+  : >"$COMMENTS_LOG"
+  write_mock_binaries "$BIN_DIR"
+
+  rsync -a \
+    --exclude '.git' \
+    --exclude '.harness/state' \
+    --exclude '.harness/tasks' \
+    --exclude '.harness/logs' \
+    --exclude '.harness-manager' \
+    --exclude '.harness-session' \
+    "$SOURCE_ROOT/" "$REPO_DIR/"
+
+  git -C "$REPO_DIR" init -q -b main
+  git -C "$REPO_DIR" config user.name "Harness Test"
+  git -C "$REPO_DIR" config user.email "harness-test@example.com"
+  git -C "$REPO_DIR" add .
+  git -C "$REPO_DIR" commit -qm "fixture"
+
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_REPO_SLUG="example/test-harness"
+EOF
+
+  write_issue_state 9001
+  write_issue_state 9002
+
+  write_pr_state 17 "Issue 9001" "https://example.test/pr/17" "MERGED" "dev" "dev-base-17" "fix/issue-9001" "issue-head-9001" "2026-03-15T10:00:00Z" "merge-dev-9001"
+  write_pr_state 18 "Issue 9002" "https://example.test/pr/18" "MERGED" "dev" "dev-base-18" "fix/issue-9002" "issue-head-9002" "2026-03-15T11:00:00Z" "merge-dev-9002"
+  write_pr_state 99 "Promote dev to main" "https://example.test/pr/99" "MERGED" "main" "main-base-99" "dev" "dev-head-99" "2026-03-15T12:00:00Z" "merge-release-99"
+
+  write_task_fixture "issue-9001" "9001" "example/test-harness" "17" "https://example.test/pr/17" "dev" "dev-base-17" "issue-head-9001"
+  write_task_fixture "issue-9002" "9002" "example/test-harness" "18" "https://example.test/pr/18" "dev" "dev-base-18" "issue-head-9002"
+  write_task_fixture "release-20260315" "null" "" "99" "https://example.test/pr/99" "main" "main-base-99" "dev-head-99"
+}
+
+task_env() {
+  env \
+    PATH="$BIN_DIR:$PATH" \
+    HARNESS_MOCK_GH_STATE_DIR="$MOCK_STATE_DIR" \
+    HARNESS_MOCK_GH_REPO="example/test-harness" \
+    HARNESS_MOCK_GH_COMMENTS_LOG="$COMMENTS_LOG" \
+    "$@"
+}
+
+issue_labels() {
+  local issue_number="$1"
+  jq -r '[.labels[].name] | sort | join(",")' "$MOCK_STATE_DIR/issue-$issue_number.json"
+}
+
+issue_comments() {
+  local issue_number="$1"
+  jq -sr --argjson issue_number "$issue_number" 'map(select(.issue_number == $issue_number) | .body) | join("\n---\n")' "$COMMENTS_LOG"
+}
+
+setup_fixture
+
+task_env "$REPO_DIR/scripts/task-land" --task-id issue-9001 >/dev/null
+task_env "$REPO_DIR/scripts/task-land" --task-id issue-9002 >/dev/null
+
+release_file="$REPO_DIR/.harness/state/release-batches.json"
+active_batch_id=$(jq -r '.active_batch_id // ""' "$release_file")
+assert_not_contains "$active_batch_id" "null" "an active release batch should exist after dev merges"
+
+active_status=$(jq -r --arg batch_id "$active_batch_id" '.batches[] | select(.id == $batch_id) | .status' "$release_file")
+assert_eq "$active_status" "active" "dev merges should keep the batch active"
+
+active_issues=$(jq -r --arg batch_id "$active_batch_id" '.batches[] | select(.id == $batch_id) | [.issues[].issue_number] | sort | join(",")' "$release_file")
+assert_eq "$active_issues" "9001,9002" "the active batch should list all merged dev issues"
+
+issue_9001_labels=$(issue_labels 9001)
+assert_contains "$issue_9001_labels" "harness:done" "issue 9001 should stay done after merging to dev"
+assert_contains "$issue_9001_labels" "harness:in-dev-batch" "issue 9001 should be tagged as part of the active dev batch"
+assert_not_contains "$issue_9001_labels" "harness:released" "issue 9001 should not be marked released before the promotion"
+
+issue_9002_labels=$(issue_labels 9002)
+assert_contains "$issue_9002_labels" "harness:in-dev-batch" "issue 9002 should also be tagged as part of the active dev batch"
+
+issue_9001_comments=$(issue_comments 9001)
+assert_contains "$issue_9001_comments" '"event":"dev_batch_joined"' "issue 9001 comments should include the dev-batch event payload"
+assert_contains "$issue_9001_comments" "\"batch_id\":\"$active_batch_id\"" "issue 9001 dev-batch comment should record the batch id"
+
+task_env "$REPO_DIR/scripts/task-land" --task-id release-20260315 >/dev/null
+
+assert_eq "$(jq -r '.active_batch_id' "$release_file")" "null" "promotion should clear the active release batch pointer"
+
+released_status=$(jq -r --arg batch_id "$active_batch_id" '.batches[] | select(.id == $batch_id) | .status' "$release_file")
+assert_eq "$released_status" "released" "promotion should finalize the active batch"
+
+released_pr_number=$(jq -r --arg batch_id "$active_batch_id" '.batches[] | select(.id == $batch_id) | .release_pr_number | tostring' "$release_file")
+assert_eq "$released_pr_number" "99" "promotion should record the release PR number"
+
+released_issue_state=$(jq -r --arg batch_id "$active_batch_id" '.batches[] | select(.id == $batch_id) | [.issues[] | "\(.issue_number):\(.release_pr_number)"] | sort | join(",")' "$release_file")
+assert_eq "$released_issue_state" "9001:99,9002:99" "promotion should stamp each shipped issue with the release PR number"
+
+issue_9001_labels=$(issue_labels 9001)
+assert_contains "$issue_9001_labels" "harness:released" "issue 9001 should be marked released after the promotion"
+assert_not_contains "$issue_9001_labels" "harness:in-dev-batch" "issue 9001 should leave the active dev batch after the promotion"
+
+issue_9002_labels=$(issue_labels 9002)
+assert_contains "$issue_9002_labels" "harness:released" "issue 9002 should be marked released after the promotion"
+assert_not_contains "$issue_9002_labels" "harness:in-dev-batch" "issue 9002 should leave the active dev batch after the promotion"
+
+issue_9002_comments=$(issue_comments 9002)
+assert_contains "$issue_9002_comments" '"event":"released_to_main"' "issue 9002 comments should include the released event payload"
+assert_contains "$issue_9002_comments" "\"batch_id\":\"$active_batch_id\"" "issue 9002 released comment should record the batch id"
+
+release_task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/release-20260315/task.json")
+assert_eq "$release_task_status" "done" "the local promotion task should complete cleanly"
+
+printf 'check-release-tracking passed\n'
