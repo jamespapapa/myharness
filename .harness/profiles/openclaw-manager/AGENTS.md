@@ -9,19 +9,19 @@
 ## First Read
 
 1. Read `START.md`.
-2. Read `../../ops/HARNESS_ADMIN.md`.
-3. Read `../../.harness/project.yaml`.
-4. Read `../../.harness/project.env`.
+2. Read `__OPS_DIR__/HARNESS_ADMIN.md`.
+3. Read `__HARNESS_DIR__/project.yaml`.
+4. Read `__HARNESS_DIR__/project.env`.
 
 ## Core Workflow
 
-1. If the work does not exist yet, create it with `../../scripts/task-intake`.
-2. Pick work with `../../scripts/task-next` or `../../scripts/task-start --next`.
-3. Claim and materialize the task with `../../scripts/task-start`.
-4. Prefer the repo-level `../../scripts/task-control-room-once` wake loop when you want one channel or cron job to keep advancing active work before claiming more.
+1. If the work does not exist yet, create it with `__SCRIPTS_DIR__/task-intake`.
+2. Pick work with `__SCRIPTS_DIR__/task-next` or `__SCRIPTS_DIR__/task-start --next`.
+3. Claim and materialize the task with `__SCRIPTS_DIR__/task-start`.
+4. Prefer the repo-level `__SCRIPTS_DIR__/task-control-room-once` wake loop when you want one channel or cron job to keep advancing active work before claiming more.
 5. Hand the generated Codex session directory to a worker, or launch Codex yourself from the suggested command.
-6. When a PR opens or the task blocks, sync status with `../../scripts/task-finish`.
-6. Keep one active task per worktree and one manager decision at a time.
+6. When a PR opens or the task blocks, sync status with `__SCRIPTS_DIR__/task-finish`.
+7. Keep one active task per worktree and one manager decision at a time.
 
 ## Hard Rules
 
@@ -32,16 +32,16 @@
 
 ## Required Commands
 
-- Create a GitHub issue: `../../scripts/task-intake --title "<title>" --body "<body>"`
-- Create and start immediately: `../../scripts/task-intake --title "<title>" --body "<body>" --start`
-- Next eligible issue: `../../scripts/task-next`
-- Repo control-room cycle: `../../scripts/task-control-room-once`
-- Autonomous one-shot cycle: `../../scripts/task-run-once`
-- Review lane cycle: `../../scripts/task-review-once`
-- Prepare lane cycle: `../../scripts/task-prepare-once`
-- Land lane cycle: `../../scripts/task-land-once`
-- Claim and create task workspace: `../../scripts/task-start --issue <n>`
-- Claim next eligible issue: `../../scripts/task-start --next`
-- Mark PR opened: `../../scripts/task-finish --issue <n> --pr <url>`
-- Mark blocked: `../../scripts/task-finish --issue <n> --blocked "<reason>"`
-- Mark merged: `../../scripts/task-finish --issue <n> --merged --pr <url>`
+- Create a GitHub issue: `__SCRIPTS_DIR__/task-intake --title "<title>" --body "<body>"`
+- Create and start immediately: `__SCRIPTS_DIR__/task-intake --title "<title>" --body "<body>" --start`
+- Next eligible issue: `__SCRIPTS_DIR__/task-next`
+- Repo control-room cycle: `__SCRIPTS_DIR__/task-control-room-once`
+- Autonomous one-shot cycle: `__SCRIPTS_DIR__/task-run-once`
+- Review lane cycle: `__SCRIPTS_DIR__/task-review-once`
+- Prepare lane cycle: `__SCRIPTS_DIR__/task-prepare-once`
+- Land lane cycle: `__SCRIPTS_DIR__/task-land-once`
+- Claim and create task workspace: `__SCRIPTS_DIR__/task-start --issue <n>`
+- Claim next eligible issue: `__SCRIPTS_DIR__/task-start --next`
+- Mark PR opened: `__SCRIPTS_DIR__/task-finish --issue <n> --pr <url>`
+- Mark blocked: `__SCRIPTS_DIR__/task-finish --issue <n> --blocked "<reason>"`
+- Mark merged: `__SCRIPTS_DIR__/task-finish --issue <n> --merged --pr <url>`

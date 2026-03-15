@@ -45,10 +45,10 @@ The human manager should spend time deciding scope and priority, not hand-carryi
 
 ## Bootstrap
 
-1. Review [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml) and adjust the control-tower channel key, execution channels, runner paths, and queue defaults for the project.
+1. Review [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml) and adjust the control-tower channel key, execution channels, runner paths, queue defaults, and `manager_dir` for the project.
 2. Review [project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) and adjust runtime integrations or base branch settings if needed.
 3. Run `scripts/openclaw-manager-setup`.
-4. Start the manager session from `.harness-manager/openclaw`.
+4. Start the manager session from the rendered `manager_dir` path from `project.yaml` (default: `.harness-manager/openclaw`).
 
 ## Production Checklist
 

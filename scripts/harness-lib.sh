@@ -85,6 +85,18 @@ harness_resolve_path() {
   printf '%s/%s\n' "$root" "$path"
 }
 
+harness_relative_path() {
+  local from="$1"
+  local to="$2"
+
+  python3 - "$from" "$to" <<'PY'
+import os, sys
+start = os.path.abspath(sys.argv[1])
+target = os.path.abspath(sys.argv[2])
+print(os.path.relpath(target, start=start))
+PY
+}
+
 harness_project_topology_summary() {
   local manifest
   manifest=$(harness_project_manifest_path)

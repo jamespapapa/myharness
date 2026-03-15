@@ -50,6 +50,7 @@ Quick start:
 
 ```bash
 scripts/openclaw-manager-setup
+# launch from the manager_dir rendered from .harness/project.yaml
 cd .harness-manager/openclaw && openclaw
 ```
 
