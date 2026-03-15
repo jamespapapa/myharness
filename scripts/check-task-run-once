@@ -329,7 +329,7 @@ EOF
 
   output=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once")
   assert_contains "$output" "waiting: active limit reached before claiming issue #9002;" "active limit should block new claims"
-  assert_contains "$output" "running=1 reconciling=0 total=1 limit=1" "waiting output should describe active running work"
+  assert_contains "$output" "assigned=0 running=1 reconciling=0 total=1 limit=1" "waiting output should describe active running work"
 
   claim_keys=$(jq -r 'keys[]' "$REPO_DIR/.harness/state/claims.json")
   assert_eq "$claim_keys" "example/test-harness#9001" "existing claim should remain untouched"
@@ -439,8 +439,8 @@ EOF
   write_issue_list '[]'
 
   output=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once")
-  assert_contains "$output" "waiting: ready queue empty; active work still running/reconciling;" "queue-empty should not report idle while active work remains"
-  assert_contains "$output" "running=1 reconciling=0 total=1 limit=1" "queue-empty waiting output should describe active running work"
+  assert_contains "$output" "waiting: ready queue empty; active work still assigned/running/reconciling;" "queue-empty should not report idle while active work remains"
+  assert_contains "$output" "assigned=0 running=1 reconciling=0 total=1 limit=1" "queue-empty waiting output should describe active running work"
 }
 
 scenario_recovers_stale_in_progress_task() {
@@ -499,10 +499,82 @@ EOF
   assert_eq "$claim_count" "0" "stale claim should be removed after reconciliation"
 }
 
+scenario_dispatch_only_records_assignment() {
+  local output claim_status assignment_slot assignment_channel worker_log claim_summary
+
+  setup_fixture "dispatch-only"
+  write_mock_issue 9010 "Dispatch only issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9010,"title":"Dispatch only issue","labels":[{"name":"Ready"}]}]'
+
+  output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once" --dispatch-only --assign-slot slot-a --assign-channel exec-a)
+  assert_eq "$output" "success: dispatched issue #9010 -> exec-a/slot-a" "dispatch-only mode should claim and assign without launching Codex"
+
+  claim_status=$(jq -r '."example/test-harness#9010".status' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_status" "assigned" "dispatch-only should leave the claim in assigned status"
+
+  assignment_slot=$(jq -r '.assignment.slot // ""' "$REPO_DIR/.harness/tasks/issue-9010/task.json")
+  assert_eq "$assignment_slot" "slot-a" "task record should store the assigned slot"
+
+  assignment_channel=$(jq -r '.assignment.channel // ""' "$REPO_DIR/.harness/tasks/issue-9010/task.json")
+  assert_eq "$assignment_channel" "exec-a" "task record should store the assigned channel"
+
+  worker_log=$(jq -r '."example/test-harness#9010".worker_log // ""' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$worker_log" "" "dispatch-only should not launch the worker"
+
+  claim_summary=$(jq -r '.last_stage_summary.happened // ""' "$REPO_DIR/.harness/tasks/issue-9010/task.json")
+  assert_contains "$claim_summary" "assigned the task to exec-a/slot-a" "claim summary should mention the assignment target"
+}
+
+scenario_assigned_only_does_not_fetch_queue() {
+  local output
+
+  setup_fixture "assigned-idle"
+  write_mock_issue 9011 "Queued but unassigned issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9011,"title":"Queued but unassigned issue","labels":[{"name":"Ready"}]}]'
+
+  output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once" --assigned-only --assign-slot slot-a --assign-channel exec-a)
+  assert_eq "$output" "idle: no task assigned to exec-a/slot-a" "assigned-only mode should stay queue-blind when nothing is assigned"
+
+  if [[ -e "$REPO_DIR/.harness/tasks/issue-9011/task.json" ]]; then
+    printf 'assigned-only mode should not have materialized a queued issue without an assignment\n' >&2
+    exit 1
+  fi
+}
+
+scenario_assigned_only_runs_preassigned_work() {
+  local dispatch_output run_output status claim_count assignment_slot assignment_channel
+
+  setup_fixture "assigned-worker"
+  write_mock_issue 9012 "Assigned execution issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9012,"title":"Assigned execution issue","labels":[{"name":"Ready"}]}]'
+
+  dispatch_output=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once" --dispatch-only --assign-slot slot-b --assign-channel exec-b)
+  assert_eq "$dispatch_output" "success: dispatched issue #9012 -> exec-b/slot-b" "control tower dispatch should assign work before the executor channel runs"
+
+  write_issue_list '[]'
+  run_output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once" --assigned-only --assign-slot slot-b --assign-channel exec-b)
+  assert_eq "$run_output" "success: reconciled issue #9012 -> PR https://example.test/pr/9012" "assigned-only mode should execute already-assigned work"
+
+  status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9012/task.json")
+  assert_eq "$status" "pr_open" "assigned task should reconcile to pr_open"
+
+  claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_count" "0" "assigned task claim should be cleared after reconciliation"
+
+  assignment_slot=$(jq -r '.assignment.slot // ""' "$REPO_DIR/.harness/tasks/issue-9012/task.json")
+  assert_eq "$assignment_slot" "slot-b" "task assignment slot should persist after execution"
+
+  assignment_channel=$(jq -r '.assignment.channel // ""' "$REPO_DIR/.harness/tasks/issue-9012/task.json")
+  assert_eq "$assignment_channel" "exec-b" "task assignment channel should persist after execution"
+}
+
 scenario_claim_and_reconcile_to_pr_open
 scenario_waits_when_active_limit_is_full
 scenario_task_start_rechecks_active_limit_under_lock
 scenario_waits_when_queue_empty_but_active_work_remains
 scenario_recovers_stale_in_progress_task
+scenario_dispatch_only_records_assignment
+scenario_assigned_only_does_not_fetch_queue
+scenario_assigned_only_runs_preassigned_work
 
 printf 'check-task-run-once passed\n'

@@ -8,7 +8,7 @@ Current status:
 - End-to-end path exercised: `issue -> claim -> worktree -> Codex -> PR -> review -> prepare -> land -> merge`
 - Review, prepare, and land now run as bounded one-shot lanes suitable for cron workers
 - The repo-level control-room tick now advances `land -> prepare -> review -> executor` from one wake loop
-- Executor one-shot dispatch stays serialized by default and reconciles stale `in_progress` work before claiming more
+- Executor dispatch now records an explicit assignment slot/channel, and execution workers can run in assigned-only mode without refetching the queue
 - The validation run's queue record lives under `artifacts/smoke/`
 
 What this repo gives you:
@@ -16,7 +16,9 @@ What this repo gives you:
 - OpenClaw manager workspace generation
 - isolated task worktrees with paired OpenClaw and Codex sessions
 - one repo-level control-room wake path for channel/cron usage
+- central dispatch that can assign work to a named execution slot/channel
 - one-shot executor, review, prepare, and land workers
+- assigned-only executor mode for execution channels or worker slots
 - stage-by-stage summaries stored on each local task record
 - tracked review / prepare / land artifacts under `artifacts/`
 - GitHub label and issue-state synchronization
@@ -65,12 +67,14 @@ Autonomous control-room entrypoint:
 
 ```bash
 scripts/task-control-room-once
+scripts/task-control-room-once --dispatch-only --assign-slot exec-1 --assign-channel project-dev-1
 ```
 
 Manual per-lane entrypoints:
 
 ```bash
 scripts/task-run-once
+scripts/task-run-once --assigned-only --assign-slot exec-1 --assign-channel project-dev-1
 scripts/task-review-once
 scripts/task-prepare-once
 scripts/task-land-once

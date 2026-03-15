@@ -690,8 +690,28 @@ harness_claim_json() {
   jq -c --arg key "$key" '.[$key] // empty' "$HARNESS_CLAIMS_FILE"
 }
 
+harness_resolve_assignment_slot() {
+  local slot="${1:-}"
+
+  harness_load_project_env
+  if [[ -z "$slot" ]]; then
+    slot="${HARNESS_DEFAULT_ASSIGNMENT_SLOT:-default}"
+  fi
+  printf '%s\n' "$slot"
+}
+
+harness_resolve_assignment_channel() {
+  local channel="${1:-}"
+
+  harness_load_project_env
+  if [[ -z "$channel" ]]; then
+    channel="${HARNESS_DEFAULT_ASSIGNMENT_CHANNEL:-control-room}"
+  fi
+  printf '%s\n' "$channel"
+}
+
 harness_write_claim() {
-  local key repo issue_number task_id branch worktree agent status now epoch had_lock
+  local key repo issue_number task_id branch worktree agent status assignment_slot assignment_channel assigned_by now epoch had_lock
   key="$1"
   repo="$2"
   issue_number="$3"
@@ -700,6 +720,9 @@ harness_write_claim() {
   worktree="$6"
   agent="$7"
   status="$8"
+  assignment_slot=$(harness_resolve_assignment_slot "${9:-}")
+  assignment_channel=$(harness_resolve_assignment_channel "${10:-}")
+  assigned_by="${11:-$agent}"
 
   harness_load_project_env
   harness_prepare_state
@@ -716,6 +739,9 @@ harness_write_claim() {
     --arg worktree "$worktree" \
     --arg agent "$agent" \
     --arg status "$status" \
+    --arg assignment_slot "$assignment_slot" \
+    --arg assignment_channel "$assignment_channel" \
+    --arg assigned_by "$assigned_by" \
     --arg claimed_at "$now" \
     --argjson claimed_epoch "$epoch" \
     --argjson issue_number "${issue_number:-null}" '
@@ -728,7 +754,13 @@ harness_write_claim() {
         agent: $agent,
         status: $status,
         claimed_at: $claimed_at,
-        claimed_epoch: $claimed_epoch
+        claimed_epoch: $claimed_epoch,
+        assignment: {
+          slot: $assignment_slot,
+          channel: $assignment_channel,
+          assigned_by: $assigned_by,
+          assigned_at: $claimed_at
+        }
       }
     ' "$HARNESS_CLAIMS_FILE" >"$HARNESS_CLAIMS_FILE.tmp"
   mv "$HARNESS_CLAIMS_FILE.tmp" "$HARNESS_CLAIMS_FILE"
@@ -803,6 +835,46 @@ harness_task_dir() {
   local task_id
   task_id="$1"
   printf '%s/%s\n' "$HARNESS_TASK_DIR" "$task_id"
+}
+
+harness_set_task_assignment() {
+  local task_id assignment_slot assignment_channel assigned_by status_file now had_lock
+  task_id="$1"
+  assignment_slot=$(harness_resolve_assignment_slot "${2:-}")
+  assignment_channel=$(harness_resolve_assignment_channel "${3:-}")
+  assigned_by="${4:-task-start}"
+
+  harness_load_project_env
+  harness_prepare_state
+  had_lock="${HARNESS_LOCK_HELD:-0}"
+  harness_acquire_lock
+  status_file=$(harness_task_status_path "$task_id")
+  if [[ ! -f "$status_file" ]]; then
+    if [[ "$had_lock" != "1" ]]; then
+      harness_release_lock
+    fi
+    return 0
+  fi
+
+  now=$(harness_now_utc)
+  jq \
+    --arg assignment_slot "$assignment_slot" \
+    --arg assignment_channel "$assignment_channel" \
+    --arg assigned_by "$assigned_by" \
+    --arg assigned_at "$now" \
+    --arg updated_at "$now" '
+      .updated_at = $updated_at
+      | .assignment = {
+          slot: $assignment_slot,
+          channel: $assignment_channel,
+          assigned_by: $assigned_by,
+          assigned_at: $assigned_at
+        }
+    ' "$status_file" >"$status_file.tmp"
+  mv "$status_file.tmp" "$status_file"
+  if [[ "$had_lock" != "1" ]]; then
+    harness_release_lock
+  fi
 }
 
 harness_task_exists() {
@@ -1769,13 +1841,15 @@ harness_fetch_issue_json() {
 }
 
 harness_print_task_summary() {
-  local task_id title branch worktree codex_session openclaw_session
+  local task_id title branch worktree codex_session openclaw_session assignment_slot assignment_channel
   task_id="$1"
   title="$2"
   branch="$3"
   worktree="$4"
   codex_session="$5"
   openclaw_session="$6"
+  assignment_slot="$7"
+  assignment_channel="$8"
 
   printf 'task_id=%s\n' "$task_id"
   printf 'title=%s\n' "$title"
@@ -1783,4 +1857,6 @@ harness_print_task_summary() {
   printf 'worktree=%s\n' "$worktree"
   printf 'codex_session=%s\n' "$codex_session"
   printf 'openclaw_session=%s\n' "$openclaw_session"
+  printf 'assignment_slot=%s\n' "$assignment_slot"
+  printf 'assignment_channel=%s\n' "$assignment_channel"
 }

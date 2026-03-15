@@ -9,6 +9,10 @@ source "$SCRIPT_DIR/harness-lib.sh"
 label_filter=""
 log_file=""
 dry_run=0
+assigned_only=0
+dispatch_only=0
+assignment_slot=""
+assignment_channel=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -24,9 +28,25 @@ while [[ $# -gt 0 ]]; do
       dry_run=1
       shift
       ;;
+    --assigned-only)
+      assigned_only=1
+      shift
+      ;;
+    --dispatch-only)
+      dispatch_only=1
+      shift
+      ;;
+    --assign-slot)
+      assignment_slot="${2:-}"
+      shift 2
+      ;;
+    --assign-channel)
+      assignment_channel="${2:-}"
+      shift 2
+      ;;
     -h|--help)
       cat <<'EOF'
-usage: scripts/task-run-once [--label <label>] [--log-file <path>] [--dry-run]
+usage: scripts/task-run-once [--label <label>] [--log-file <path>] [--dry-run] [--assigned-only | --dispatch-only] [--assign-slot <slot>] [--assign-channel <channel>]
 EOF
       exit 0
       ;;
@@ -38,6 +58,12 @@ done
 
 harness_load_project_env
 harness_prepare_state
+assignment_slot=$(harness_resolve_assignment_slot "$assignment_slot")
+assignment_channel=$(harness_resolve_assignment_channel "$assignment_channel")
+
+if [[ "$assigned_only" -eq 1 && "$dispatch_only" -eq 1 ]]; then
+  harness_die "--assigned-only and --dispatch-only cannot be combined"
+fi
 
 if [[ -z "$label_filter" ]]; then
   label_filter="$HARNESS_AUTONOMOUS_LABEL"
@@ -46,6 +72,10 @@ fi
 if [[ -z "$log_file" ]]; then
   log_file="$HARNESS_LOG_DIR/task-run-once.jsonl"
 fi
+
+assignment_ref() {
+  printf '%s/%s\n' "$assignment_channel" "$assignment_slot"
+}
 
 emit_log() {
   local status="$1"
@@ -109,7 +139,8 @@ task_snapshot_by_id() {
     --arg claim_key "$claim_key" \
     --argjson task "$task_json" \
     --argjson claim "$claim_json" '
-      $task + {
+      ($task + {
+        assignment: ($task.assignment // $claim.assignment // null),
         claim_key: $claim_key,
         claim_status: ($claim.status // ""),
         claimed_at: ($claim.claimed_at // ""),
@@ -117,7 +148,7 @@ task_snapshot_by_id() {
         claim_note: ($claim.note // ""),
         worker_log: ($claim.worker_log // ""),
         worker_exit: ($claim.worker_exit // "")
-      }
+      })
     '
 }
 
@@ -152,6 +183,20 @@ active_tasks_json() {
   '
 }
 
+filter_assigned_tasks_json() {
+  local active_json="$1"
+
+  printf '%s' "$active_json" | jq -c \
+    --arg assignment_slot "$assignment_slot" \
+    --arg assignment_channel "$assignment_channel" '
+      [
+        .[]
+        | select((.assignment.slot // "") == $assignment_slot)
+        | select((.assignment.channel // "") == $assignment_channel)
+      ]
+    '
+}
+
 classify_active_task() {
   local task_json="$1"
   local claim_status claimed_epoch worker_exit now_epoch age
@@ -167,6 +212,11 @@ classify_active_task() {
 
   if [[ -z "$claim_status" ]]; then
     printf 'reconciling\n'
+    return 0
+  fi
+
+  if [[ "$claim_status" == "assigned" ]]; then
+    printf 'assigned\n'
     return 0
   fi
 
@@ -187,14 +237,18 @@ classify_active_task() {
 
 active_summary() {
   local active_json="$1"
-  local task_json state running reconciling total
+  local task_json state assigned running reconciling total
 
+  assigned=0
   running=0
   reconciling=0
   while IFS= read -r task_json; do
     [[ -n "$task_json" ]] || continue
     state=$(classify_active_task "$task_json")
     case "$state" in
+      assigned)
+        assigned=$((assigned + 1))
+        ;;
       running)
         running=$((running + 1))
         ;;
@@ -204,9 +258,9 @@ active_summary() {
     esac
   done < <(printf '%s' "$active_json" | jq -c '.[]')
 
-  total=$((running + reconciling))
-  printf 'running=%s reconciling=%s total=%s limit=%s\n' \
-    "$running" "$reconciling" "$total" "$HARNESS_EXECUTOR_ACTIVE_LIMIT"
+  total=$((assigned + running + reconciling))
+  printf 'assigned=%s running=%s reconciling=%s total=%s limit=%s\n' \
+    "$assigned" "$running" "$reconciling" "$total" "$HARNESS_EXECUTOR_ACTIVE_LIMIT"
 }
 
 find_reconcilable_active_task() {
@@ -216,6 +270,21 @@ find_reconcilable_active_task() {
   while IFS= read -r task_json; do
     [[ -n "$task_json" ]] || continue
     if [[ "$(classify_active_task "$task_json")" == "reconciling" ]]; then
+      printf '%s\n' "$task_json"
+      return 0
+    fi
+  done < <(printf '%s' "$active_json" | jq -c '.[]')
+
+  return 1
+}
+
+find_assigned_pending_task() {
+  local active_json="$1"
+  local task_json
+
+  while IFS= read -r task_json; do
+    [[ -n "$task_json" ]] || continue
+    if [[ "$(classify_active_task "$task_json")" == "assigned" ]]; then
       printf '%s\n' "$task_json"
       return 0
     fi
@@ -350,22 +419,24 @@ reconcile_task() {
   esac
 }
 
-launch_worker_for_task() {
-  local task_json_path="$1"
-  local launch_message="$2"
-  local task_json issue_number task_id title worktree worker_log finish_script repo_slug claim_key gh_token worker_prompt
+run_worker_for_task() {
+  local task_json="$1"
+  local issue_number task_id title worktree repo_slug claim_key worker_log finish_script gh_token worker_exit worker_prompt
+  local task_snapshot status pr_url note
   local -a codex_env
-  local worker_exit task_snapshot status pr_url note
 
-  task_json=$(cat "$task_json_path")
   issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
   task_id=$(printf '%s' "$task_json" | jq -r '.task_id')
   title=$(printf '%s' "$task_json" | jq -r '.title')
   worktree=$(printf '%s' "$task_json" | jq -r '.worktree')
+  repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
+  claim_key=$(printf '%s' "$task_json" | jq -r '.claim_key // ""')
+  if [[ -z "$claim_key" ]]; then
+    claim_key=$(harness_claim_key "$repo_slug" "$issue_number" "$task_id")
+  fi
+
   worker_log="$HARNESS_LOG_DIR/$task_id-$(date -u +%Y%m%dT%H%M%SZ).log"
   finish_script="$(harness_repo_root)/scripts/task-finish"
-  repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
-  claim_key=$(harness_claim_key "$repo_slug" "$issue_number" "$task_id")
   gh_token=""
   codex_env=()
   if harness_can_sync_github; then
@@ -375,8 +446,9 @@ launch_worker_for_task() {
     codex_env=(GH_TOKEN="$gh_token" GITHUB_TOKEN="$gh_token")
   fi
 
-  emit_log "claimed" "$launch_message" "$issue_number" "$task_id" "$title"
+  emit_log "claimed" "assigned task launching Codex" "$issue_number" "$task_id" "$title"
   harness_update_claim_status "$claim_key" "in_progress" "executor running" "$worker_log"
+  harness_record_stage_summary "$task_id" "executor" "started" "Executor started a Codex worker for the assigned task."
 
   worker_prompt=$(cat <<EOF
 Read .harness-session/codex/AGENTS.md, .harness-session/codex/TASK.md, and .harness-session/codex/PR_BODY.md from the current repository root. Follow them exactly and complete the task end-to-end.
@@ -394,10 +466,18 @@ EOF
 )
 
   worker_exit=0
-  if (cd "$worktree" && harness_run_with_timeout "$HARNESS_EXECUTOR_TIMEOUT_SECONDS" env "${codex_env[@]}" codex exec --disable child_agents_md --full-auto "$worker_prompt") >"$worker_log" 2>&1; then
-    worker_exit=0
+  if [[ "${#codex_env[@]}" -gt 0 ]]; then
+    if (cd "$worktree" && harness_run_with_timeout "$HARNESS_EXECUTOR_TIMEOUT_SECONDS" env "${codex_env[@]}" codex exec --disable child_agents_md --full-auto "$worker_prompt") >"$worker_log" 2>&1; then
+      worker_exit=0
+    else
+      worker_exit=$?
+    fi
   else
-    worker_exit=$?
+    if (cd "$worktree" && harness_run_with_timeout "$HARNESS_EXECUTOR_TIMEOUT_SECONDS" codex exec --disable child_agents_md --full-auto "$worker_prompt") >"$worker_log" 2>&1; then
+      worker_exit=0
+    else
+      worker_exit=$?
+    fi
   fi
 
   harness_update_claim_status "$claim_key" "reconciling" "executor exited with code $worker_exit" "$worker_log" "$worker_exit"
@@ -425,12 +505,64 @@ EOF
       ;;
   esac
 
-  reconcile_task "$task_snapshot"
+  if reconcile_task "$task_snapshot"; then
+    return 0
+  fi
+  return $?
 }
 
 active_tasks=$(active_tasks_json)
 active_total=$(printf '%s' "$active_tasks" | jq 'length')
 active_summary_text=$(active_summary "$active_tasks")
+
+if [[ "$assigned_only" -eq 1 ]]; then
+  assigned_tasks=$(filter_assigned_tasks_json "$active_tasks")
+  assigned_total=$(printf '%s' "$assigned_tasks" | jq 'length')
+  assigned_summary_text=$(active_summary "$assigned_tasks")
+
+  if reconcilable_task=$(find_reconcilable_active_task "$assigned_tasks" 2>/dev/null); then
+    reconcile_issue_number=$(printf '%s' "$reconcilable_task" | jq -r '.issue_number // ""')
+    reconcile_task_id=$(printf '%s' "$reconcilable_task" | jq -r '.task_id')
+    if [[ "$dry_run" -eq 1 ]]; then
+      waiting_detail="assigned task $reconcile_task_id on $(assignment_ref) requires reconciliation before any new run; $assigned_summary_text"
+      emit_log "waiting" "assigned task requires reconciliation" "$reconcile_issue_number" "$reconcile_task_id" "$waiting_detail"
+      printf 'waiting: %s\n' "$waiting_detail"
+      exit 0
+    fi
+    if reconcile_task "$reconcilable_task"; then
+      exit 0
+    fi
+    exit $?
+  fi
+
+  if pending_task=$(find_assigned_pending_task "$assigned_tasks" 2>/dev/null); then
+    issue_number=$(printf '%s' "$pending_task" | jq -r '.issue_number // ""')
+    title=$(printf '%s' "$pending_task" | jq -r '.title')
+    task_id=$(printf '%s' "$pending_task" | jq -r '.task_id')
+    if [[ "$dry_run" -eq 1 ]]; then
+      emit_log "selected" "dry-run selected assigned task" "$issue_number" "$task_id" "$(assignment_ref): $title"
+      printf 'selected assigned issue #%s for %s: %s\n' "$issue_number" "$(assignment_ref)" "$title"
+      exit 0
+    fi
+    if run_worker_for_task "$pending_task"; then
+      exit 0
+    fi
+    exit $?
+  fi
+
+  if [[ "$assigned_total" -gt 0 ]]; then
+    running_task_id=$(printf '%s' "$assigned_tasks" | jq -r '.[0].task_id // ""')
+    waiting_detail="assignment $(assignment_ref) already has active work; task=$running_task_id; $assigned_summary_text"
+    emit_log "waiting" "assignment already busy" "" "$running_task_id" "$waiting_detail"
+    printf 'waiting: %s\n' "$waiting_detail"
+    exit 0
+  fi
+
+  idle_detail="no task assigned to $(assignment_ref)"
+  emit_log "idle" "assignment idle" "" "" "$idle_detail"
+  printf 'idle: %s\n' "$idle_detail"
+  exit 0
+fi
 
 if reconcilable_task=$(find_reconcilable_active_task "$active_tasks" 2>/dev/null); then
   reconcile_issue_number=$(printf '%s' "$reconcilable_task" | jq -r '.issue_number // ""')
@@ -443,9 +575,8 @@ if reconcilable_task=$(find_reconcilable_active_task "$active_tasks" 2>/dev/null
   fi
   if reconcile_task "$reconcilable_task"; then
     exit 0
-  else
-    exit $?
   fi
+  exit $?
 fi
 
 next_rework_task=$(harness_find_next_task_by_status "rework" || true)
@@ -478,7 +609,7 @@ if [[ -n "$next_rework_task" ]]; then
   harness_update_task_status "$rework_task_id" "in_progress" "automatic review rework attempt $rework_attempts of $rework_limit in progress" "$pr_url"
   harness_record_stage_summary "$rework_task_id" "executor" "started" "Executor started automatic review rework attempt $rework_attempts of $rework_limit." "$pr_url"
 
-  if launch_worker_for_task "$task_json_path" "resumed automatic review rework"; then
+  if run_worker_for_task "$(task_snapshot_by_id "$rework_task_id")"; then
     exit 0
   else
     exit $?
@@ -488,7 +619,7 @@ fi
 if ! next_output=$(next_issue_json 2>&1); then
   if [[ "$next_output" == *"no eligible issue found"* ]]; then
     if [[ "$active_total" -gt 0 ]]; then
-      waiting_detail="ready queue empty; active work still running/reconciling; $active_summary_text"
+      waiting_detail="ready queue empty; active work still assigned/running/reconciling; $active_summary_text"
       emit_log "waiting" "ready queue empty but active work remains" "" "" "$waiting_detail"
       printf 'waiting: %s\n' "$waiting_detail"
       exit 0
@@ -522,7 +653,7 @@ if [[ "$dry_run" -eq 1 ]]; then
   exit 0
 fi
 
-if ! start_output=$("$SCRIPT_DIR/task-start" --issue "$issue_number" --enforce-active-limit 2>&1); then
+if ! start_output=$("$SCRIPT_DIR/task-start" --issue "$issue_number" --assign-slot "$assignment_slot" --assign-channel "$assignment_channel" --assigned-by "task-run-once" --enforce-active-limit 2>&1); then
   if [[ "$start_output" == *"active executor limit reached:"* ]]; then
     waiting_detail="active limit reached during claim for issue #$issue_number; $active_summary_text"
     emit_log "waiting" "active limit reached during claim" "$issue_number" "$task_id" "$waiting_detail"
@@ -540,11 +671,16 @@ if ! start_output=$("$SCRIPT_DIR/task-start" --issue "$issue_number" --enforce-a
   exit 1
 fi
 
-task_json_path=$(harness_task_status_path "$task_id")
-[[ -f "$task_json_path" ]] || harness_die "missing task.json for $task_id"
-harness_record_stage_summary "$task_id" "executor" "started" "Executor started a Codex worker for the claimed task."
-if launch_worker_for_task "$task_json_path" "claimed issue and launching Codex"; then
+task_snapshot=$(task_snapshot_by_id "$task_id")
+
+if [[ "$dispatch_only" -eq 1 ]]; then
+  dispatch_detail="assigned issue #$issue_number to $(assignment_ref)"
+  emit_log "success" "dispatched issue to assignment" "$issue_number" "$task_id" "$dispatch_detail"
+  printf 'success: dispatched issue #%s -> %s\n' "$issue_number" "$(assignment_ref)"
   exit 0
-else
-  exit $?
 fi
+
+if run_worker_for_task "$task_snapshot"; then
+  exit 0
+fi
+exit $?

@@ -19,7 +19,7 @@ The human manager should spend time deciding scope and priority, not hand-carryi
 - Validated outcome: `issue -> PR -> review artifact -> prepare artifact -> merge`.
 - `task-land` now performs the merge when review and prepare artifacts match the current PR head and base.
 - Queue selection is currently oldest eligible issue first, gated by the `Ready` label by default and overrideable with `--label`.
-- `task-control-room-once` now advances `land -> prepare -> review -> executor` from one repo-level wake loop.
+- `task-control-room-once` now advances `land -> prepare -> review -> executor` from one repo-level wake loop, and can dispatch to a named execution slot/channel without launching the worker locally.
 - When the Ready queue is empty and there is no unresolved active work, the control-room flow now emits one canonical stdout line: `checked: no work (Ready queue empty)`.
 - Lane-specific idle reasons still stay in JSONL `detail` fields for land/prepare/review/executor logs so operators and tooling can distinguish why a lane was idle without changing the operator-facing status line.
 - The current validation depth is one docs-only issue. For a real codebase, you still need project-specific gates and required-check policy.
@@ -409,11 +409,32 @@ The executor portion still behaves like this when reached:
 - resume one queued `rework` task before claiming new issue work,
 - pick one eligible issue,
 - only claim it if the active executor limit still has capacity,
+- write an explicit assignment slot/channel record onto the claimed task,
 - create the worktree and Codex session,
-- run Codex in full-auto mode,
+- either dispatch only or run Codex in full-auto mode,
 - require a terminal harness state,
 - log one JSONL result line,
 - exit.
+
+To keep queue selection centralized while using separate execution channels, run the control tower like this:
+
+```bash
+scripts/task-control-room-once --dispatch-only --assign-slot exec-1 --assign-channel project-dev-1
+```
+
+That mode still reconciles `land -> prepare -> review` first, then claims one eligible issue and leaves it in `assigned` state for the matching execution worker.
+
+Execution channels should not call `task-next` or self-claim. They should only consume their own assignment:
+
+```bash
+scripts/task-run-once --assigned-only --assign-slot exec-1 --assign-channel project-dev-1
+```
+
+If you want the original single-loop seed behavior, keep using:
+
+```bash
+scripts/task-control-room-once
+```
 
 Expected control-room outcomes:
 
@@ -438,6 +459,7 @@ Manual lane entrypoints remain available:
 
 ```bash
 scripts/task-run-once
+scripts/task-run-once --assigned-only --assign-slot exec-1 --assign-channel project-dev-1
 scripts/task-review-once
 scripts/task-prepare-once
 scripts/task-land-once
@@ -450,8 +472,8 @@ Those lanes consume local task states in order:
 - `reviewed` -> prepare
 - `prepared` -> land
 
-For real unattended operation, the normal topology is one repo channel or cron wake loop running `scripts/task-control-room-once`.
-If backlog grows, add more identical repo-level wakes only intentionally, and keep `HARNESS_EXECUTOR_ACTIVE_LIMIT="1"` unless you want concurrent active executor tasks.
+For real unattended operation, the normal topology is one control-tower channel or cron wake loop running `scripts/task-control-room-once`, plus zero or more execution channels running `scripts/task-run-once --assigned-only ...`.
+If backlog grows, add more execution slots intentionally, keep queue fetch/claim in the control tower, and keep `HARNESS_EXECUTOR_ACTIVE_LIMIT="1"` unless you want concurrent active executor tasks.
 
 ## Paired AGENTS Model
 
@@ -472,10 +494,14 @@ This gives you a Codex/OpenClaw pair for the same task without mutating tracked 
 From the manager workspace, OpenClaw should run:
 
 ```bash
-../../scripts/task-start --next
+../../scripts/task-control-room-once --dispatch-only --assign-slot exec-1 --assign-channel project-dev-1
 ```
 
-Then it should hand the generated Codex session path to a worker.
+Then the matching execution worker should run:
+
+```bash
+../../scripts/task-run-once --assigned-only --assign-slot exec-1 --assign-channel project-dev-1
+```
 
 ### “OpenClaw manager, turn this design into an issue and start it”
 

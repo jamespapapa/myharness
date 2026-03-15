@@ -14,6 +14,9 @@ label_filter=""
 launch=""
 use_next=0
 enforce_active_limit=0
+assignment_slot=""
+assignment_channel=""
+assigned_by="task-start"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -45,13 +48,25 @@ while [[ $# -gt 0 ]]; do
       launch="${2:-}"
       shift 2
       ;;
+    --assign-slot)
+      assignment_slot="${2:-}"
+      shift 2
+      ;;
+    --assign-channel)
+      assignment_channel="${2:-}"
+      shift 2
+      ;;
+    --assigned-by)
+      assigned_by="${2:-}"
+      shift 2
+      ;;
     --enforce-active-limit)
       enforce_active_limit=1
       shift
       ;;
     -h|--help)
       cat <<'EOF'
-usage: scripts/task-start [--issue <n> | --next | --task-id <id> --title <title>] [--label <label>] [--body <text>] [--launch codex] [--enforce-active-limit]
+usage: scripts/task-start [--issue <n> | --next | --task-id <id> --title <title>] [--label <label>] [--body <text>] [--launch codex] [--assign-slot <slot>] [--assign-channel <channel>] [--assigned-by <name>] [--enforce-active-limit]
 EOF
       exit 0
       ;;
@@ -80,6 +95,8 @@ fi
 
 harness_load_project_env
 harness_prepare_state
+assignment_slot=$(harness_resolve_assignment_slot "$assignment_slot")
+assignment_channel=$(harness_resolve_assignment_channel "$assignment_channel")
 harness_acquire_lock
 trap 'harness_release_lock' EXIT
 repo_slug=""
@@ -122,18 +139,20 @@ branch=$(printf '%s' "$task_json" | jq -r '.branch')
 worktree=$(printf '%s' "$task_json" | jq -r '.worktree')
 codex_session=$(printf '%s' "$task_json" | jq -r '.codex_session')
 openclaw_session=$(printf '%s' "$task_json" | jq -r '.openclaw_session')
+harness_set_task_assignment "$task_id" "$assignment_slot" "$assignment_channel" "$assigned_by"
+assignment_label="$assignment_channel/$assignment_slot"
 
 if [[ -n "$issue_number" ]]; then
-  harness_write_claim "$claim_key" "$repo_slug" "$issue_number" "$task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "in_progress"
+  harness_write_claim "$claim_key" "$repo_slug" "$issue_number" "$task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "assigned" "$assignment_slot" "$assignment_channel" "$assigned_by"
   harness_update_task_status "$task_id" "in_progress"
-  harness_record_stage_summary "$task_id" "claim" "started" "Claim started and created the isolated task workspace on branch $branch."
+  harness_record_stage_summary "$task_id" "claim" "started" "Claim started, assigned the task to $assignment_label, and created the isolated task workspace on branch $branch."
   if harness_can_sync_github; then
     harness_issue_started "$repo_slug" "$issue_number" "$task_id" "$branch" "$worktree"
   fi
 else
-  harness_write_claim "$claim_key" "" "" "$task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "in_progress"
+  harness_write_claim "$claim_key" "" "" "$task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "assigned" "$assignment_slot" "$assignment_channel" "$assigned_by"
   harness_update_task_status "$task_id" "in_progress"
-  harness_record_stage_summary "$task_id" "claim" "started" "Claim started and created the isolated task workspace on branch $branch."
+  harness_record_stage_summary "$task_id" "claim" "started" "Claim started, assigned the task to $assignment_label, and created the isolated task workspace on branch $branch."
 fi
 
 printf 'task ready: %s\n' "$task_id"
@@ -142,6 +161,7 @@ printf 'branch: %s\n' "$branch"
 printf 'worktree: %s\n' "$worktree"
 printf 'codex session: %s\n' "$codex_session"
 printf 'openclaw session: %s\n' "$openclaw_session"
+printf 'assignment: %s\n' "$assignment_label"
 printf '\n'
 printf 'Codex command:\n'
 printf '  cd %q && codex\n' "$codex_session"
