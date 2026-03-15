@@ -1,0 +1,524 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SOURCE_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
+
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+write_mock_binaries() {
+  local bin_dir="$1"
+
+  mkdir -p "$bin_dir"
+
+  cat >"$bin_dir/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_dir="${HARNESS_MOCK_GH_STATE_DIR:?}"
+repo_dir="${HARNESS_MOCK_REPO_DIR:?}"
+repo_slug="${HARNESS_MOCK_GH_REPO:-example/test-harness}"
+
+issue_path() {
+  printf '%s/issue-%s.json\n' "$state_dir" "$1"
+}
+
+pr_path() {
+  printf '%s/pr-%s.json\n' "$state_dir" "$1"
+}
+
+current_issues_json() {
+  local -a issue_glob=()
+  shopt -s nullglob
+  issue_glob=("$state_dir"/issue-*.json)
+  shopt -u nullglob
+  if [[ "${#issue_glob[@]}" -eq 0 ]]; then
+    printf '[]\n'
+    return 0
+  fi
+
+  jq -s '
+    sort_by(.number)
+    | map({
+        number,
+        title,
+        body,
+        url,
+        html_url: .url,
+        labels: (.labels // []),
+        assignees: (.assignees // []),
+        state: (.state // "OPEN")
+      })
+  ' "${issue_glob[@]}"
+}
+
+update_issue_labels() {
+  local issue_number="$1"
+  shift
+  local issue_file labels_json label
+  local -a add_labels=() remove_labels=()
+
+  issue_file=$(issue_path "$issue_number")
+  labels_json=$(jq -c '[.labels[].name]' "$issue_file")
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --add-label)
+        add_labels+=("${2:-}")
+        shift 2
+        ;;
+      --remove-label)
+        remove_labels+=("${2:-}")
+        shift 2
+        ;;
+      -R|--repo|--add-assignee)
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  for label in "${remove_labels[@]-}"; do
+    [[ -n "$label" ]] || continue
+    labels_json=$(printf '%s' "$labels_json" | jq --arg label "$label" 'map(select(. != $label))')
+  done
+  for label in "${add_labels[@]-}"; do
+    [[ -n "$label" ]] || continue
+    labels_json=$(printf '%s' "$labels_json" | jq --arg label "$label" 'if index($label) then . else . + [$label] end')
+  done
+
+  jq --argjson labels "$labels_json" '.labels = ($labels | map({name:.}))' "$issue_file" >"$issue_file.tmp"
+  mv "$issue_file.tmp" "$issue_file"
+}
+
+render_pr_json() {
+  local pr_number="$1"
+  local pr_file base_ref head_ref base_sha head_sha pr_url pr_title files_json
+
+  pr_file=$(pr_path "$pr_number")
+  base_ref=$(jq -r '.baseRefName' "$pr_file")
+  head_ref=$(jq -r '.headRefName' "$pr_file")
+  pr_url=$(jq -r '.url' "$pr_file")
+  pr_title=$(jq -r '.title' "$pr_file")
+  base_sha=$(git -C "$repo_dir" rev-parse "origin/$base_ref")
+  head_sha=$(git -C "$repo_dir" rev-parse "$head_ref")
+  files_json=$(git -C "$repo_dir" diff --name-only "$base_sha...$head_sha" | jq -R '{path:.}' | jq -s '.')
+
+  jq -nc \
+    --argjson number "$pr_number" \
+    --arg title "$pr_title" \
+    --arg url "$pr_url" \
+    --arg base_ref "$base_ref" \
+    --arg base_sha "$base_sha" \
+    --arg head_ref "$head_ref" \
+    --arg head_sha "$head_sha" \
+    --argjson files "$files_json" \
+    '{
+      number: $number,
+      title: $title,
+      url: $url,
+      state: "OPEN",
+      isDraft: false,
+      baseRefName: $base_ref,
+      baseRefOid: $base_sha,
+      headRefName: $head_ref,
+      headRefOid: $head_sha,
+      statusCheckRollup: [],
+      files: $files,
+      mergeStateStatus: "CLEAN"
+    }'
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  auth)
+    case "${1:-}" in
+      status)
+        exit 0
+        ;;
+      token)
+        printf 'mock-token\n'
+        exit 0
+        ;;
+    esac
+    ;;
+  repo)
+    if [[ "${1:-}" == "view" ]]; then
+      printf '%s\n' "$repo_slug"
+      exit 0
+    fi
+    ;;
+  api)
+    if [[ "${1:-}" == "user" ]]; then
+      printf 'mock-user\n'
+      exit 0
+    fi
+    if [[ "${1:-}" == repos/*/issues* ]]; then
+      current_issues_json
+      exit 0
+    fi
+    ;;
+  issue)
+    case "${1:-}" in
+      view)
+        issue_number="${2:?}"
+        cat "$(issue_path "$issue_number")"
+        exit 0
+        ;;
+      edit)
+        shift
+        issue_number="${1:?}"
+        shift
+        update_issue_labels "$issue_number" "$@"
+        exit 0
+        ;;
+      comment)
+        exit 0
+        ;;
+    esac
+    ;;
+  label)
+    case "${1:-}" in
+      list|create)
+        exit 0
+        ;;
+    esac
+    ;;
+  pr)
+    case "${1:-}" in
+      view)
+        pr_ref="${2:?}"
+        pr_number="${pr_ref##*/}"
+        render_pr_json "$pr_number"
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+
+printf 'unsupported gh invocation: %s %s\n' "$cmd" "$*" >&2
+exit 1
+EOF
+  chmod +x "$bin_dir/gh"
+
+  cat >"$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "exec" ]]; then
+  shift
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --disable|--add-dir|-c)
+      shift 2
+      ;;
+    --full-auto)
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [[ -f REVIEW_TASK.md ]]; then
+  verdict="${HARNESS_MOCK_REVIEW_VERDICT:?}"
+  summary="${HARNESS_MOCK_REVIEW_SUMMARY:-mock review $verdict}"
+  review_md=$(sed -n 's/^- artifact_markdown: `\(.*\)`/\1/p' REVIEW_TASK.md | head -n 1)
+  review_json=$(sed -n 's/^- artifact_json: `\(.*\)`/\1/p' REVIEW_TASK.md | head -n 1)
+  task_id=$(sed -n 's/^- task_id: `\(.*\)`/\1/p' REVIEW_TASK.md | head -n 1)
+  issue_number=$(sed -n 's/^- issue_number: `\(.*\)`/\1/p' REVIEW_TASK.md | head -n 1)
+  pr_number=$(sed -n 's/^- pr_number: `\(.*\)`/\1/p' REVIEW_TASK.md | head -n 1)
+  pr_url=$(sed -n 's/^- pr_url: \(.*\)$/\1/p' REVIEW_TASK.md | head -n 1)
+  base_sha=$(sed -n 's/^- base_sha: `\(.*\)`/\1/p' REVIEW_TASK.md | head -n 1)
+  head_sha=$(sed -n 's/^- head_sha: `\(.*\)`/\1/p' REVIEW_TASK.md | head -n 1)
+
+  cat >"$review_md" <<EOF_MD
+Verdict: $verdict
+
+Summary: $summary
+
+Findings:
+- $summary
+
+Residual risks:
+- none
+EOF_MD
+
+  if [[ "$issue_number" == "none" ]]; then
+    issue_number_json="null"
+  else
+    issue_number_json="$issue_number"
+  fi
+
+  cat >"$review_json" <<EOF_JSON
+{
+  "task_id": "$task_id",
+  "issue_number": $issue_number_json,
+  "pr_number": $pr_number,
+  "pr_url": "$pr_url",
+  "reviewed_base_sha": "$base_sha",
+  "reviewed_head_sha": "$head_sha",
+  "reviewed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "verdict": "$verdict",
+  "summary": "$summary",
+  "blocking_findings": ["$summary"],
+  "residual_risks": ["none"]
+}
+EOF_JSON
+  exit 0
+fi
+
+case "${HARNESS_MOCK_EXECUTOR_MODE:-touch-readme}" in
+  touch-readme)
+    printf '\nreview loop proof %s\n' "${HARNESS_MOCK_EXECUTOR_APPEND:-executor}" >>README.md
+    ;;
+  no-op)
+    ;;
+  *)
+    printf 'unknown HARNESS_MOCK_EXECUTOR_MODE=%s\n' "${HARNESS_MOCK_EXECUTOR_MODE}" >&2
+    exit 1
+    ;;
+esac
+EOF
+  chmod +x "$bin_dir/codex"
+}
+
+setup_fixture() {
+  local name="$1"
+
+  FIXTURE_DIR="$TMP_DIR/$name"
+  REPO_DIR="$FIXTURE_DIR/repo"
+  REMOTE_DIR="$FIXTURE_DIR/remote.git"
+  MOCK_STATE_DIR="$FIXTURE_DIR/mock-gh"
+  BIN_DIR="$FIXTURE_DIR/bin"
+  mkdir -p "$FIXTURE_DIR" "$MOCK_STATE_DIR"
+
+  write_mock_binaries "$BIN_DIR"
+
+  rsync -a \
+    --exclude '.git' \
+    --exclude '.harness/state' \
+    --exclude '.harness/tasks' \
+    --exclude '.harness/logs' \
+    --exclude '.harness-manager' \
+    --exclude '.harness-session' \
+    "$SOURCE_ROOT/" "$REPO_DIR/"
+
+  git -C "$REPO_DIR" init -q -b main
+  git -C "$REPO_DIR" config user.name "Harness Test"
+  git -C "$REPO_DIR" config user.email "harness-test@example.com"
+  git -C "$REPO_DIR" add .
+  git -C "$REPO_DIR" commit -qm "fixture"
+
+  git init --bare -q "$REMOTE_DIR"
+  git -C "$REPO_DIR" remote add origin "$REMOTE_DIR"
+  git -C "$REPO_DIR" push -u origin main >/dev/null 2>&1
+  git -C "$REPO_DIR" branch dev main
+  git -C "$REPO_DIR" push -u origin dev >/dev/null 2>&1
+
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_REPO_SLUG="example/test-harness"
+HARNESS_AUTONOMOUS_LABEL="Ready"
+HARNESS_EXECUTOR_TIMEOUT_SECONDS="5"
+HARNESS_REVIEW_TIMEOUT_SECONDS="5"
+EOF
+}
+
+write_mock_issue() {
+  local issue_number="$1"
+  local title="$2"
+
+  cat >"$MOCK_STATE_DIR/issue-$issue_number.json" <<EOF
+{
+  "number": $issue_number,
+  "title": $(printf '%s' "$title" | jq -Rs .),
+  "body": "Synthetic issue body.",
+  "url": "https://example.test/issues/$issue_number",
+  "labels": [{"name":"Ready"}],
+  "assignees": [],
+  "state": "OPEN"
+}
+EOF
+}
+
+write_pr_state() {
+  local pr_number="$1"
+  local branch="$2"
+
+  cat >"$MOCK_STATE_DIR/pr-$pr_number.json" <<EOF
+{
+  "number": $pr_number,
+  "url": "https://example.test/pr/$pr_number",
+  "title": "PR $pr_number",
+  "baseRefName": "dev",
+  "headRefName": "$branch"
+}
+EOF
+}
+
+task_env() {
+  env \
+    PATH="$BIN_DIR:$PATH" \
+    HARNESS_MOCK_GH_STATE_DIR="$MOCK_STATE_DIR" \
+    HARNESS_MOCK_REPO_DIR="$REPO_DIR" \
+    HARNESS_MOCK_GH_REPO="example/test-harness" \
+    "$@"
+}
+
+assert_eq() {
+  local actual="$1"
+  local expected="$2"
+  local message="$3"
+
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'assert_eq failed: %s\nexpected: %s\nactual:   %s\n' "$message" "$expected" "$actual" >&2
+    exit 1
+  fi
+}
+
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local message="$3"
+
+  if [[ "$haystack" != *"$needle"* ]]; then
+    printf 'assert_contains failed: %s\nneedle: %s\nhaystack: %s\n' "$message" "$needle" "$haystack" >&2
+    exit 1
+  fi
+}
+
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local message="$3"
+
+  if [[ "$haystack" == *"$needle"* ]]; then
+    printf 'assert_not_contains failed: %s\nneedle: %s\nhaystack: %s\n' "$message" "$needle" "$haystack" >&2
+    exit 1
+  fi
+}
+
+create_pr_open_task() {
+  local issue_number="$1"
+  local title="$2"
+  local task_json task_dir worktree branch pr_url
+
+  write_mock_issue "$issue_number" "$title"
+  task_env "$REPO_DIR/scripts/task-start" --issue "$issue_number" >/dev/null
+
+  task_dir="$REPO_DIR/.harness/tasks/issue-$issue_number"
+  task_json="$task_dir/task.json"
+  worktree=$(jq -r '.worktree' "$task_json")
+  branch=$(jq -r '.branch' "$task_json")
+  pr_url="https://example.test/pr/$issue_number"
+
+  printf '\ninitial proof for issue %s\n' "$issue_number" >>"$worktree/README.md"
+  git -C "$worktree" add README.md
+  git -C "$worktree" commit -qm "feat: initial change for issue $issue_number"
+  git -C "$worktree" push -u origin "$branch" >/dev/null 2>&1
+
+  write_pr_state "$issue_number" "$branch"
+  task_env "$REPO_DIR/scripts/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null
+}
+
+scenario_retryable_rework_requeues_executor() {
+  local issue_number="9001"
+  local task_json status attempts stage output
+
+  setup_fixture "retryable-rework"
+  create_pr_open_task "$issue_number" "Retryable review finding"
+  task_json="$REPO_DIR/.harness/tasks/issue-$issue_number/task.json"
+
+  task_env HARNESS_MOCK_REVIEW_VERDICT="rework" HARNESS_MOCK_REVIEW_SUMMARY="missing proof but fixable on the same branch" \
+    "$REPO_DIR/scripts/task-review" --task-id "issue-$issue_number" >/dev/null
+
+  status=$(jq -r '.status' "$task_json")
+  attempts=$(jq -r '.review_rework_attempts' "$task_json")
+  stage=$(jq -r '.last_stage_summary.stage_id' "$task_json")
+  assert_eq "$status" "rework" "retryable review findings should move the task into rework"
+  assert_eq "$attempts" "1" "first retryable finding should increment the rework counter"
+  assert_eq "$stage" "review_rework" "stage summary should record the rework outcome"
+
+  output=$(task_env HARNESS_MOCK_EXECUTOR_MODE="touch-readme" HARNESS_MOCK_EXECUTOR_APPEND="retry-1" \
+    "$REPO_DIR/scripts/task-run-once")
+  status=$(jq -r '.status' "$task_json")
+  attempts=$(jq -r '.review_rework_attempts' "$task_json")
+  assert_contains "$output" "success: reconciled issue #9001 -> PR https://example.test/pr/9001" "executor should resume the same PR branch after rework"
+  assert_eq "$status" "pr_open" "successful automatic rework should return the task to pr_open"
+  assert_eq "$attempts" "1" "successful rework should preserve the recorded attempt count"
+}
+
+scenario_rejected_is_terminal_without_blocking() {
+  local issue_number="9002"
+  local task_json status stage labels output
+
+  setup_fixture "rejected-terminal"
+  create_pr_open_task "$issue_number" "Rejected review finding"
+  task_json="$REPO_DIR/.harness/tasks/issue-$issue_number/task.json"
+
+  task_env HARNESS_MOCK_REVIEW_VERDICT="rejected" HARNESS_MOCK_REVIEW_SUMMARY="the approach is invalid and should be discarded" \
+    "$REPO_DIR/scripts/task-review" --task-id "issue-$issue_number" >/dev/null
+
+  status=$(jq -r '.status' "$task_json")
+  stage=$(jq -r '.last_stage_summary.stage_id' "$task_json")
+  labels=$(jq -r '[.labels[].name] | join(",")' "$MOCK_STATE_DIR/issue-$issue_number.json")
+  output=$(task_env "$REPO_DIR/scripts/task-control-room-once")
+
+  assert_eq "$status" "rejected" "review rejection should be a distinct terminal task state"
+  assert_eq "$stage" "review_rejected" "stage summary should record the rejection outcome"
+  assert_contains "$labels" "harness:pr-open" "rejected work should remain visible as a PR-backed task"
+  assert_not_contains "$labels" "harness:blocked" "rejected work should not be labeled as blocked"
+  assert_eq "$output" "checked: no work (Ready queue empty)" "rejected work should not automatically re-enter executor or blocked lanes"
+}
+
+scenario_third_rework_blocks() {
+  local issue_number="9003"
+  local task_json status attempts stage note labels output exit_code attempt
+
+  setup_fixture "rework-limit"
+  create_pr_open_task "$issue_number" "Repeated rework escalation"
+  task_json="$REPO_DIR/.harness/tasks/issue-$issue_number/task.json"
+
+  for attempt in 1 2; do
+    task_env HARNESS_MOCK_REVIEW_VERDICT="rework" HARNESS_MOCK_REVIEW_SUMMARY="still fixable attempt $attempt" \
+      "$REPO_DIR/scripts/task-review" --task-id "issue-$issue_number" >/dev/null
+    output=$(task_env HARNESS_MOCK_EXECUTOR_MODE="touch-readme" HARNESS_MOCK_EXECUTOR_APPEND="retry-$attempt" \
+      "$REPO_DIR/scripts/task-run-once")
+    assert_contains "$output" "success: reconciled issue #9003 -> PR https://example.test/pr/9003" "first two rework findings should still retry automatically"
+  done
+
+  if output=$(task_env HARNESS_MOCK_REVIEW_VERDICT="rework" HARNESS_MOCK_REVIEW_SUMMARY="still fixable attempt 3" \
+    "$REPO_DIR/scripts/task-review" --task-id "issue-$issue_number" 2>&1); then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+
+  status=$(jq -r '.status' "$task_json")
+  attempts=$(jq -r '.review_rework_attempts' "$task_json")
+  stage=$(jq -r '.last_stage_summary.stage_id' "$task_json")
+  note=$(jq -r '.note' "$task_json")
+  labels=$(jq -r '[.labels[].name] | join(",")' "$MOCK_STATE_DIR/issue-$issue_number.json")
+
+  assert_eq "$exit_code" "2" "the third retryable review finding should escalate as blocked"
+  assert_eq "$status" "blocked" "automatic rework should stop after the third failed attempt"
+  assert_eq "$attempts" "3" "the task should persist the capped rework attempt count"
+  assert_eq "$stage" "review_blocked" "stage summary should record the escalation"
+  assert_contains "$note" "automatic review rework limit reached (3/3)" "blocked note should explain why the loop stopped"
+  assert_contains "$labels" "harness:blocked" "escalated rework should sync the blocked GitHub label"
+}
+
+scenario_retryable_rework_requeues_executor
+scenario_rejected_is_terminal_without_blocking
+scenario_third_rework_blocks
+
+printf 'check-review-outcomes passed\n'

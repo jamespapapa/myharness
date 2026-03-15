@@ -71,6 +71,7 @@ Current priority order:
 - Docs-only changes should use the lightest valid verification path.
 - Verification should be scope-aware: changed paths decide which gates run.
 - The path-to-lane mapping must live in an executable rule file, not only in prose.
+- Architecture, schema, integration, and operator-flow changes must update mapped docs; `scripts/check-doc-coverage` enforces this from `.harness/doc-coverage.rules.json`.
 - Runtime or policy changes must record exact commands run and results.
 - Prefer build/check/test gates over intuition.
 - Keep local hooks and CI aligned so the same class of failure is caught before review.
@@ -95,6 +96,9 @@ When adding the harness kernel, prioritize these files:
 - `ops/JANITOR.md`
 - `ops/HARNESS_ADMIN.md`
 - `ops/AUTONOMOUS_SWARM.md`
+- `ops/MULTI_PROJECT_MODEL.md`
+- `ops/HARNESS_SYNC.md`
+- `ops/PROJECT_AGENTS_CONTRACT.md`
 - `.harness/project.env`
 - `.harness/profiles/**/AGENTS.md`
 - `scripts/committer`
@@ -129,6 +133,20 @@ When adding the harness kernel, prioritize these files:
 - Per-project commands, risky paths, and verification commands stay declarative in the project manifest.
 - Precedence must stay explicit: harness-core defaults < project overlay < task/run artifact < explicit operator override.
 - Do not hard-code repo-specific behavior into the core unless it is truly universal.
+- Multi-project rollout should use one control-tower channel per project plus one or more execution channels, while queue fetch/claim stays centralized.
+- Per-project branch strategy should stay declarative: issue work flows through a configurable integration branch, while release promotion stays separate on the release branch.
+- Shared harness-core paths inside project repos are sync-owned and should change only through harness sync.
+- Project `AGENTS.md` files should stay concise and stable: purpose, long-lived constraints, harness ownership contract, and a map to detailed docs.
+- Detailed architecture, schema, ops, and integration knowledge should live in dedicated docs, with AGENTS linking to them instead of duplicating them.
+- If a task changes architecture, schema, major integrations, or operator procedures, writing/updating the mapped docs is part of done.
+
+## Multi-Project Reference Docs
+
+- [ops/MULTI_PROJECT_MODEL.md](ops/MULTI_PROJECT_MODEL.md) — control-tower + execution-channel topology, runner model, and dispatch expectations
+- [ops/HARNESS_SYNC.md](ops/HARNESS_SYNC.md) — core-owned vs project-owned paths and sync-only update flow
+- [ops/PROJECT_AGENTS_CONTRACT.md](ops/PROJECT_AGENTS_CONTRACT.md) — what project AGENTS.md should contain and how doc mapping should work
+- [ops/HARNESS_ADMIN.md](ops/HARNESS_ADMIN.md) — operator flow, prepare/check behavior, and runtime administration
+- [ops/AUTONOMOUS_SWARM.md](ops/AUTONOMOUS_SWARM.md) — lane ordering and autonomous control-room execution model
 
 ## Success Criteria
 

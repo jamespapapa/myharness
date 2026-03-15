@@ -1,0 +1,508 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SOURCE_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
+
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+write_mock_binaries() {
+  local bin_dir="$1"
+
+  mkdir -p "$bin_dir"
+
+  cat >"$bin_dir/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_dir="${HARNESS_MOCK_GH_STATE_DIR:?}"
+repo_slug="${HARNESS_MOCK_GH_REPO:-example/test-harness}"
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  auth)
+    case "${1:-}" in
+      status)
+        exit 0
+        ;;
+      token)
+        printf 'mock-token\n'
+        exit 0
+        ;;
+    esac
+    ;;
+  repo)
+    if [[ "${1:-}" == "view" ]]; then
+      printf '%s\n' "$repo_slug"
+      exit 0
+    fi
+    ;;
+  api)
+    if [[ "${1:-}" == "user" ]]; then
+      printf 'mock-user\n'
+      exit 0
+    fi
+
+    if [[ "${1:-}" == repos/*/issues* ]]; then
+      cat "$state_dir/issues.json"
+      exit 0
+    fi
+    ;;
+  issue)
+    case "${1:-}" in
+      view)
+        issue_number="${2:?}"
+        cat "$state_dir/issue-$issue_number.json"
+        exit 0
+        ;;
+      edit|comment)
+        exit 0
+        ;;
+    esac
+    ;;
+  label)
+    case "${1:-}" in
+      list)
+        exit 0
+        ;;
+      create)
+        exit 0
+        ;;
+    esac
+    ;;
+  pr)
+    case "${1:-}" in
+      create)
+        shift
+        head_branch=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --head)
+              head_branch="${2:-}"
+              shift 2
+              ;;
+            *)
+              shift
+              ;;
+          esac
+        done
+        if [[ "$head_branch" =~ ([0-9]+)$ ]]; then
+          pr_number="${BASH_REMATCH[1]}"
+        else
+          pr_number="9999"
+        fi
+        head_key="${head_branch//\//__}"
+        pr_url="https://example.test/pr/$pr_number"
+        printf '%s\n' "$pr_url" >"$state_dir/pr-$head_key.url"
+        printf '%s\n' "$pr_url"
+        exit 0
+        ;;
+      list)
+        shift
+        head_branch=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --head)
+              head_branch="${2:-}"
+              shift 2
+              ;;
+            *)
+              shift
+              ;;
+          esac
+        done
+        head_key="${head_branch//\//__}"
+        if [[ -f "$state_dir/pr-$head_key.url" ]]; then
+          cat "$state_dir/pr-$head_key.url"
+        fi
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+
+printf 'unsupported gh invocation: %s %s\n' "$cmd" "$*" >&2
+exit 1
+EOF
+  chmod +x "$bin_dir/gh"
+
+  cat >"$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "exec" ]]; then
+  shift
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --disable)
+      shift 2
+      ;;
+    --full-auto)
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+case "${HARNESS_MOCK_CODEX_MODE:-touch-readme}" in
+  touch-readme)
+    printf '\nACP reconcile proof from mock codex.\n' >>README.md
+    ;;
+  no-op)
+    ;;
+  *)
+    printf 'unknown HARNESS_MOCK_CODEX_MODE=%s\n' "${HARNESS_MOCK_CODEX_MODE}" >&2
+    exit 1
+    ;;
+esac
+EOF
+  chmod +x "$bin_dir/codex"
+}
+
+setup_fixture() {
+  local name="$1"
+
+  FIXTURE_DIR="$TMP_DIR/$name"
+  REPO_DIR="$FIXTURE_DIR/repo"
+  REMOTE_DIR="$FIXTURE_DIR/remote.git"
+  MOCK_STATE_DIR="$FIXTURE_DIR/mock-gh"
+  BIN_DIR="$FIXTURE_DIR/bin"
+  WORKTREE_ROOT="$FIXTURE_DIR/repo-worktrees"
+
+  mkdir -p "$FIXTURE_DIR" "$MOCK_STATE_DIR"
+  write_mock_binaries "$BIN_DIR"
+
+  rsync -a \
+    --exclude '.git' \
+    --exclude '.harness/state' \
+    --exclude '.harness/tasks' \
+    --exclude '.harness/logs' \
+    --exclude '.harness-manager' \
+    --exclude '.harness-session' \
+    "$SOURCE_ROOT/" "$REPO_DIR/"
+
+  git -C "$REPO_DIR" init -q -b main
+  git -C "$REPO_DIR" config user.name "Harness Test"
+  git -C "$REPO_DIR" config user.email "harness-test@example.com"
+  git -C "$REPO_DIR" add .
+  git -C "$REPO_DIR" commit -qm "fixture"
+
+  git init --bare -q "$REMOTE_DIR"
+  git -C "$REPO_DIR" remote add origin "$REMOTE_DIR"
+  git -C "$REPO_DIR" push -u origin main >/dev/null 2>&1
+  git -C "$REPO_DIR" branch dev main
+  git -C "$REPO_DIR" push -u origin dev >/dev/null 2>&1
+
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_AUTONOMOUS_LABEL="Ready"
+HARNESS_EXECUTOR_TIMEOUT_SECONDS="2"
+HARNESS_EXECUTOR_ACTIVE_LIMIT="1"
+EOF
+}
+
+mock_issue_file() {
+  local issue_number="$1"
+  printf '%s/issue-%s.json\n' "$MOCK_STATE_DIR" "$issue_number"
+}
+
+write_mock_issue() {
+  local issue_number="$1"
+  local title="$2"
+  local labels_json="$3"
+  local body="${4:-Synthetic issue body.}"
+
+  cat >"$(mock_issue_file "$issue_number")" <<EOF
+{
+  "number": $issue_number,
+  "title": $(printf '%s' "$title" | jq -Rs .),
+  "body": $(printf '%s' "$body" | jq -Rs .),
+  "url": "https://example.test/issues/$issue_number",
+  "labels": $labels_json,
+  "assignees": [],
+  "state": "OPEN"
+}
+EOF
+}
+
+write_issue_list() {
+  local list_json="$1"
+  printf '%s\n' "$list_json" >"$MOCK_STATE_DIR/issues.json"
+}
+
+task_env() {
+  env \
+    PATH="$BIN_DIR:$PATH" \
+    HARNESS_MOCK_GH_STATE_DIR="$MOCK_STATE_DIR" \
+    HARNESS_MOCK_GH_REPO="example/test-harness" \
+    "$@"
+}
+
+assert_eq() {
+  local actual="$1"
+  local expected="$2"
+  local message="$3"
+
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'assert_eq failed: %s\nexpected: %s\nactual:   %s\n' "$message" "$expected" "$actual" >&2
+    exit 1
+  fi
+}
+
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local message="$3"
+
+  if [[ "$haystack" != *"$needle"* ]]; then
+    printf 'assert_contains failed: %s\nneedle: %s\nhaystack: %s\n' "$message" "$needle" "$haystack" >&2
+    exit 1
+  fi
+}
+
+scenario_claim_and_reconcile_to_pr_open() {
+  local output status claim_count
+
+  setup_fixture "claim-and-pr"
+  write_mock_issue 9001 "Synthetic executor issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9001,"title":"Synthetic executor issue","labels":[{"name":"Ready"}]}]'
+
+  output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once")
+  assert_eq "$output" "success: reconciled issue #9001 -> PR https://example.test/pr/9001" "new issue should claim and reconcile to pr_open"
+
+  status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9001/task.json")
+  assert_eq "$status" "pr_open" "new issue should leave pr_open state"
+
+  claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_count" "0" "claim should be cleared after pr_open"
+}
+
+scenario_waits_when_active_limit_is_full() {
+  local now_epoch now_iso output claim_keys
+
+  setup_fixture "limit-wait"
+  now_epoch=$(date -u +%s)
+  now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  mkdir -p "$REPO_DIR/.harness/tasks/issue-9001" "$WORKTREE_ROOT/issue-9001"
+
+  cat >"$REPO_DIR/.harness/tasks/issue-9001/task.json" <<EOF
+{
+  "task_id": "issue-9001",
+  "issue_number": 9001,
+  "title": "Already active issue",
+  "repo_slug": "example/test-harness",
+  "branch": "fix/issue-9001",
+  "base_branch": "dev",
+  "worktree": "$WORKTREE_ROOT/issue-9001",
+  "status": "in_progress",
+  "created_at": "$now_iso",
+  "updated_at": "$now_iso"
+}
+EOF
+
+  mkdir -p "$REPO_DIR/.harness/state"
+  cat >"$REPO_DIR/.harness/state/claims.json" <<EOF
+{
+  "example/test-harness#9001": {
+    "repo": "example/test-harness",
+    "issue_number": 9001,
+    "task_id": "issue-9001",
+    "branch": "fix/issue-9001",
+    "worktree": "$WORKTREE_ROOT/issue-9001",
+    "agent": "codex",
+    "status": "in_progress",
+    "claimed_at": "$now_iso",
+    "claimed_epoch": $now_epoch
+  }
+}
+EOF
+
+  write_mock_issue 9002 "Queued issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9002,"title":"Queued issue","labels":[{"name":"Ready"}]}]'
+
+  output=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once")
+  assert_contains "$output" "waiting: active limit reached before claiming issue #9002;" "active limit should block new claims"
+  assert_contains "$output" "running=1 reconciling=0 total=1 limit=1" "waiting output should describe active running work"
+
+  claim_keys=$(jq -r 'keys[]' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_keys" "example/test-harness#9001" "existing claim should remain untouched"
+  if [[ -e "$REPO_DIR/.harness/tasks/issue-9002/task.json" ]]; then
+    printf 'issue-9002 should not have been claimed while active limit was full\n' >&2
+    exit 1
+  fi
+}
+
+scenario_task_start_rechecks_active_limit_under_lock() {
+  local now_epoch now_iso output claim_keys
+
+  setup_fixture "start-enforce-limit"
+  now_epoch=$(date -u +%s)
+  now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  mkdir -p "$REPO_DIR/.harness/tasks/issue-9001" "$WORKTREE_ROOT/issue-9001"
+
+  cat >"$REPO_DIR/.harness/tasks/issue-9001/task.json" <<EOF
+{
+  "task_id": "issue-9001",
+  "issue_number": 9001,
+  "title": "Already active issue",
+  "repo_slug": "example/test-harness",
+  "branch": "fix/issue-9001",
+  "base_branch": "dev",
+  "worktree": "$WORKTREE_ROOT/issue-9001",
+  "status": "in_progress",
+  "created_at": "$now_iso",
+  "updated_at": "$now_iso"
+}
+EOF
+
+  mkdir -p "$REPO_DIR/.harness/state"
+  cat >"$REPO_DIR/.harness/state/claims.json" <<EOF
+{
+  "example/test-harness#9001": {
+    "repo": "example/test-harness",
+    "issue_number": 9001,
+    "task_id": "issue-9001",
+    "branch": "fix/issue-9001",
+    "worktree": "$WORKTREE_ROOT/issue-9001",
+    "agent": "codex",
+    "status": "in_progress",
+    "claimed_at": "$now_iso",
+    "claimed_epoch": $now_epoch
+  }
+}
+EOF
+
+  write_mock_issue 9002 "Queued issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9002,"title":"Queued issue","labels":[{"name":"Ready"}]}]'
+
+  if output=$(task_env "$REPO_DIR/scripts/task-start" --issue 9002 --enforce-active-limit 2>&1); then
+    printf 'task-start should have enforced the active executor limit under lock\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$output" "active executor limit reached: total=1 limit=1" "task-start should reject claims once the active executor limit is full"
+  claim_keys=$(jq -r 'keys[]' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_keys" "example/test-harness#9001" "task-start should not add a second claim when the active limit is full"
+  if [[ -e "$REPO_DIR/.harness/tasks/issue-9002/task.json" ]]; then
+    printf 'issue-9002 should not have been materialized when task-start hit the active limit\n' >&2
+    exit 1
+  fi
+}
+
+scenario_waits_when_queue_empty_but_active_work_remains() {
+  local now_epoch now_iso output
+
+  setup_fixture "queue-empty-wait"
+  now_epoch=$(date -u +%s)
+  now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  mkdir -p "$REPO_DIR/.harness/tasks/issue-9001" "$WORKTREE_ROOT/issue-9001"
+
+  cat >"$REPO_DIR/.harness/tasks/issue-9001/task.json" <<EOF
+{
+  "task_id": "issue-9001",
+  "issue_number": 9001,
+  "title": "Still running",
+  "repo_slug": "example/test-harness",
+  "branch": "fix/issue-9001",
+  "base_branch": "dev",
+  "worktree": "$WORKTREE_ROOT/issue-9001",
+  "status": "in_progress",
+  "created_at": "$now_iso",
+  "updated_at": "$now_iso"
+}
+EOF
+
+  mkdir -p "$REPO_DIR/.harness/state"
+  cat >"$REPO_DIR/.harness/state/claims.json" <<EOF
+{
+  "example/test-harness#9001": {
+    "repo": "example/test-harness",
+    "issue_number": 9001,
+    "task_id": "issue-9001",
+    "branch": "fix/issue-9001",
+    "worktree": "$WORKTREE_ROOT/issue-9001",
+    "agent": "codex",
+    "status": "in_progress",
+    "claimed_at": "$now_iso",
+    "claimed_epoch": $now_epoch
+  }
+}
+EOF
+
+  write_issue_list '[]'
+
+  output=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once")
+  assert_contains "$output" "waiting: ready queue empty; active work still running/reconciling;" "queue-empty should not report idle while active work remains"
+  assert_contains "$output" "running=1 reconciling=0 total=1 limit=1" "queue-empty waiting output should describe active running work"
+}
+
+scenario_recovers_stale_in_progress_task() {
+  local stale_epoch stale_iso output status claim_count
+
+  setup_fixture "recover-stale"
+  stale_epoch=$(( $(date -u +%s) - 10 ))
+  stale_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  git -C "$REPO_DIR" checkout -q -b fix/issue-9001 dev
+  printf '\nStale ACP worktree change.\n' >>"$REPO_DIR/README.md"
+
+  mkdir -p "$REPO_DIR/.harness/tasks/issue-9001" "$REPO_DIR/.harness/state"
+  cat >"$REPO_DIR/.harness/tasks/issue-9001/task.json" <<EOF
+{
+  "task_id": "issue-9001",
+  "issue_number": 9001,
+  "title": "Recover stale in-progress issue",
+  "repo_slug": "example/test-harness",
+  "branch": "fix/issue-9001",
+  "base_branch": "dev",
+  "worktree": "$REPO_DIR",
+  "status": "in_progress",
+  "created_at": "$stale_iso",
+  "updated_at": "$stale_iso"
+}
+EOF
+
+  cat >"$REPO_DIR/.harness/state/claims.json" <<EOF
+{
+  "example/test-harness#9001": {
+    "repo": "example/test-harness",
+    "issue_number": 9001,
+    "task_id": "issue-9001",
+    "branch": "fix/issue-9001",
+    "worktree": "$REPO_DIR",
+    "agent": "codex",
+    "status": "reconciling",
+    "claimed_at": "$stale_iso",
+    "claimed_epoch": $stale_epoch,
+    "worker_log": "$REPO_DIR/.harness/logs/issue-9001.log",
+    "worker_exit": "0"
+  }
+}
+EOF
+
+  write_issue_list '[]'
+
+  output=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once")
+  assert_eq "$output" "success: reconciled issue #9001 -> PR https://example.test/pr/9001" "stale in_progress task should reconcile to pr_open"
+
+  status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9001/task.json")
+  assert_eq "$status" "pr_open" "stale task should no longer be in_progress"
+
+  claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_count" "0" "stale claim should be removed after reconciliation"
+}
+
+scenario_claim_and_reconcile_to_pr_open
+scenario_waits_when_active_limit_is_full
+scenario_task_start_rechecks_active_limit_under_lock
+scenario_waits_when_queue_empty_but_active_work_remains
+scenario_recovers_stale_in_progress_task
+
+printf 'check-task-run-once passed\n'

@@ -17,13 +17,18 @@ The human manager should spend time deciding scope and priority, not hand-carryi
 
 - The full four-lane path has been exercised against a live GitHub issue in this repo.
 - Validated outcome: `issue -> PR -> review artifact -> prepare artifact -> merge`.
-- `task-land` now performs the merge when review and prepare artifacts match the current PR head.
+- `task-land` now performs the merge when review and prepare artifacts match the current PR head and base.
+- Queue selection is currently oldest eligible issue first, gated by the `Ready` label by default and overrideable with `--label`.
+- `task-control-room-once` now advances `land -> prepare -> review -> executor` from one repo-level wake loop.
+- When the Ready queue is empty and there is no unresolved active work, the control-room flow now emits one canonical stdout line: `checked: no work (Ready queue empty)`.
+- Lane-specific idle reasons still stay in JSONL `detail` fields for land/prepare/review/executor logs so operators and tooling can distinguish why a lane was idle without changing the operator-facing status line.
 - The current validation depth is one docs-only issue. For a real codebase, you still need project-specific gates and required-check policy.
 - Issue intake quality is still a policy and script convention here, not a GitHub-enforced issue form.
 
 ## What Is Included
 
 - Root [AGENTS.md](/Users/jules/Desktop/work/myharness/AGENTS.md): repo-level operating contract.
+- [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml): machine-readable topology, runner, and queue defaults.
 - [project.env](/Users/jules/Desktop/work/myharness/.harness/project.env): harness defaults.
 - Codex task profile: [.harness/profiles/codex/AGENTS.md](/Users/jules/Desktop/work/myharness/.harness/profiles/codex/AGENTS.md)
 - OpenClaw task profile: [.harness/profiles/openclaw-task/AGENTS.md](/Users/jules/Desktop/work/myharness/.harness/profiles/openclaw-task/AGENTS.md)
@@ -42,9 +47,16 @@ The human manager should spend time deciding scope and priority, not hand-carryi
 
 ## Bootstrap
 
-1. Review [project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) and adjust labels or base branch if needed.
-2. Run `scripts/openclaw-manager-setup`.
-3. Start the manager session from `.harness-manager/openclaw`.
+1. Review [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml) and adjust the control-tower channel key, execution channels, runner paths, queue defaults, and `manager_dir` for the project.
+2. Review [project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) and adjust runtime integrations plus integration/release branch settings if needed.
+3. Run `scripts/openclaw-manager-setup`.
+4. Start the manager session from the rendered `manager_dir` path from `project.yaml` (default: `.harness-manager/openclaw`).
+
+## Branch Strategy
+
+- `HARNESS_INTEGRATION_BRANCH` is the default source branch for new issue worktrees and the default PR target for issue work.
+- `HARNESS_RELEASE_BRANCH` stays separate for later promotion from the integration branch into release.
+- `HARNESS_BASE_BRANCH` remains a compatibility alias and resolves to the integration branch unless an operator overrides it explicitly.
 
 ## Production Checklist
 
@@ -52,9 +64,24 @@ Before you trust autonomous merge on a real repository:
 
 1. Update [.harness/prepare.commands](/Users/jules/Desktop/work/myharness/.harness/prepare.commands) with the repo's real `lint`, `test`, `build`, and invariant commands.
 2. Set `HARNESS_REQUIRE_GREEN_CHECKS="1"` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) if GitHub checks must be green before merge.
-3. Set `HARNESS_REPO_SLUG`, `HARNESS_BASE_BRANCH`, and any label filter you actually want to run.
-4. Add GitHub issue forms, or require all intake to flow through `scripts/task-intake`.
-5. Decide how many executor workers you want, then add the corresponding cron jobs.
+3. Confirm the queue gate and execution slot count you want in [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml) (current defaults: one control tower, one execution slot, queue label `Ready`).
+4. If you want Jira comments, set `HARNESS_JIRA_BASE_URL`, `HARNESS_JIRA_USER_EMAIL`, and `HARNESS_JIRA_API_TOKEN` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env).
+5. Add GitHub issue forms, or require all intake to flow through `scripts/task-intake`.
+6. Decide how many executor workers you want, update `topology.execution.slot_count` plus `topology.execution.channels[]` in [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml), then add the corresponding cron jobs.
+
+## Documentation Coverage Gate
+
+Prepare now runs `scripts/check-doc-coverage` before the normal prepare command list, even when the PR is docs-only.
+
+That gate reads [`.harness/doc-coverage.rules.json`](/Users/jules/Desktop/work/myharness/.harness/doc-coverage.rules.json) and fails when:
+
+- architecture-sensitive paths change without a mapped architecture/admin doc update,
+- schema-sensitive paths change without a mapped contract/admin doc update,
+- integration-sensitive paths change without a mapped admin/sync doc update,
+- operator-policy or verification-gate paths change without a mapped runbook update,
+- a new critical doc appears under `ops/` or the major `docs/` categories and `AGENTS.md` does not reference it.
+
+Local `scripts/check-harness` runs the same gate so workers see the failure before review or prepare.
 
 ## Manager Session
 
@@ -100,6 +127,24 @@ To create and immediately claim/start it:
 scripts/task-intake --title "..." --body "..." --start
 ```
 
+If the work is a harness-core propagation request, create the issue with the sync generator instead of freehand body editing:
+
+```bash
+scripts/task-sync-request --source-ref harness-core@abc1234
+scripts/task-sync-request --source-ref harness-core@abc1234 --start
+```
+
+That command creates an ordinary issue with:
+
+- source core version / commit
+- target repo
+- expected shared-path updates
+- likely overlay conflict points
+- verification requirements
+
+The default values come from `.harness/sync-request.defaults.json`.
+If this specific sync needs different scope or proof, pass `--shared-path`, `--overlay-conflict`, `--verify`, or `--migration-note`; explicit flags override the tracked defaults for that request only.
+
 ## Issue Authoring Contract
 
 If you are creating issues manually in GitHub, keep the body structured so the worker does not have to infer intent:
@@ -127,13 +172,26 @@ If you are creating issues manually in GitHub, keep the body structured so the w
 - What proof or behavior is required before merge?
 ```
 
+If the work should mirror into Jira, add one explicit line anywhere in the body:
+
+```md
+Jira: ABC-123
+```
+
+You can also use a browse URL instead:
+
+```md
+Jira: https://jira.example.test/browse/ABC-123
+```
+
 This seed repo does not yet enforce that contract through `.github/ISSUE_TEMPLATE/`, so use `scripts/task-intake` or apply this template manually.
 
 ### 2. Pick the next issue
 
 ```bash
-scripts/task-next
+scripts/task-next          # default queue: oldest eligible issue with label `Ready`
 scripts/task-next --label bug
+scripts/task-next --label Ready
 ```
 
 ### 3. Claim and create a task workspace
@@ -192,7 +250,7 @@ scripts/task-finish --issue 123 --merged --pr https://github.com/owner/repo/pull
 
 ## GitHub State Model
 
-The harness mirrors task state with four labels:
+The harness mirrors queue state with four GitHub labels:
 
 - `harness:in-progress`
 - `harness:pr-open`
@@ -203,29 +261,136 @@ These are created automatically on first use if they do not already exist.
 
 Claims are also tracked locally in `.harness/state/claims.json`. `task-next` prunes stale claims older than `HARNESS_CLAIM_TTL_MINUTES`.
 
+Review outcomes use additional repo-local task states in `.harness/tasks/<task-id>/task.json`:
+
+- `reviewed`: review approved and prepare may run
+- `rework`: retryable review findings; executor should repair the same task / PR branch automatically
+- `rejected`: terminal invalid attempt; do not escalate and do not auto-retry
+- `blocked`: human attention or an external decision is required
+
+Each task record also keeps:
+
+- `review_rework_attempts`: how many automatic review-repair loops have already been used
+- `review_rework_limit`: the retry cap, currently `3`
+
+When review returns `rework`, the control room routes that task back to executor before claiming a new issue. If review still returns `rework` on the third attempt, the task is converted to `blocked` and escalated.
+
+## Stage Summaries
+
+Each task record now keeps a machine-readable stage history in `.harness/tasks/<task-id>/task.json`:
+
+- `last_stage_summary`: most recent stage transition
+- `stage_summaries`: append-only history of stage transitions for the task
+
+The stable `stage_id` values are:
+
+- `claim_started`
+- `executor_started`
+- `executor_reconciled_to_pr`
+- `executor_blocked`
+- `review_approved`
+- `review_rework`
+- `review_rejected`
+- `review_blocked`
+- `prepare_passed`
+- `prepare_failed`
+- `prepare_blocked`
+- `land_merged`
+- `land_failed`
+- `land_blocked`
+
+Each summary entry records:
+
+- task and issue reference
+- current stage
+- what actually happened
+- PR link when available
+- blocked reason and operator action when relevant
+
+These summaries are intended to be the reusable local reporting surface for the control-room and future integrations.
+
+## Jira Comment Sync
+
+Jira sync is opt-in and configuration-driven. The harness only posts Jira comments when all of these are true:
+
+1. `.harness/project.env` sets `HARNESS_JIRA_BASE_URL`
+2. `.harness/project.env` sets `HARNESS_JIRA_USER_EMAIL`
+3. `.harness/project.env` sets `HARNESS_JIRA_API_TOKEN`
+4. the task or issue body contains an explicit Jira link line such as `Jira: ABC-123`
+
+When enabled, the harness posts concise comments for these major transitions:
+
+- claim started
+- executor started
+- executor reconciled to PR
+- review approved / rework / rejected / blocked
+- prepare passed / failed / blocked
+- land merged / failed / blocked
+
+Jira comment format:
+
+- task reference
+- GitHub issue reference
+- current stage label
+- what happened in that stage
+- PR URL when present
+- blocked reason and expected operator action when relevant
+
+The Jira comment body intentionally avoids raw local filesystem paths or full local logs.
+
 ## Autonomous Mode
 
 If you want “register GitHub issues and let workers consume them”, use:
 
 ```bash
-scripts/task-run-once
+scripts/task-control-room-once
 ```
 
-That one command performs one worker tick:
+That one command performs one repo wake tick:
 
+- advance `prepared` work through land first,
+- otherwise advance `reviewed` work through prepare,
+- otherwise advance `pr_open` work through review,
+- otherwise resume one queued `rework` task on its existing branch,
+- otherwise run executor reconcile/claim logic,
+- log one JSONL result line,
+- exit.
+
+The executor portion still behaves like this when reached:
+
+- reconcile one stale `in_progress` executor task first when needed,
+- resume one queued `rework` task before claiming new issue work,
 - pick one eligible issue,
-- claim it,
+- only claim it if the active executor limit still has capacity,
 - create the worktree and Codex session,
 - run Codex in full-auto mode,
 - require a terminal harness state,
 - log one JSONL result line,
 - exit.
 
+Expected control-room outcomes:
+
+- `idle`: `Ready` queue empty and no unresolved work in land/prepare/review/executor lanes
+- `waiting`: active work still needs another wake, or executor capacity is intentionally full
+- `success`: one lane advanced work toward merge or completion
+- `blocked`: one lane reconciled a task to `blocked`
+- `error`: the worker could not record a valid next state
+
+If `.harness/project.env` sets `HARNESS_CONTROL_ROOM_DISCORD_WEBHOOK_URL`, blocked transitions also post one concise operator-facing Discord line that includes:
+
+- task / issue reference
+- failing lane (`executor`, `review`, `prepare`, or `land`)
+- short reason
+- expected operator action when the lane needs intervention
+
+Review rejections also post to the same channel, but as `rejected` rather than `blocked`, so non-escalation outcomes stay visible without looking like harness failures.
+
 See [ops/AUTONOMOUS_SWARM.md](/Users/jules/Desktop/work/myharness/ops/AUTONOMOUS_SWARM.md) for the cron-swarm model.
 
-For the full four-lane pipeline, add:
+Manual lane entrypoints remain available:
 
 ```bash
+scripts/task-run-once
 scripts/task-review-once
 scripts/task-prepare-once
 scripts/task-land-once
@@ -234,17 +399,12 @@ scripts/task-land-once
 Those lanes consume local task states in order:
 
 - `pr_open` -> review
+- `rework` -> executor repair on the same task / PR branch
 - `reviewed` -> prepare
 - `prepared` -> land
 
-For real unattended operation, the normal topology is:
-
-- `N` executor workers running `scripts/task-run-once`
-- `1` review worker running `scripts/task-review-once`
-- `1` prepare worker running `scripts/task-prepare-once`
-- `1` land worker running `scripts/task-land-once`
-
-If the queue backs up, increase executor workers first.
+For real unattended operation, the normal topology is one repo channel or cron wake loop running `scripts/task-control-room-once`.
+If backlog grows, add more identical repo-level wakes only intentionally, and keep `HARNESS_EXECUTOR_ACTIVE_LIMIT="1"` unless you want concurrent active executor tasks.
 
 ## Paired AGENTS Model
 
@@ -276,6 +436,20 @@ From the manager workspace:
 
 ```bash
 ../../scripts/task-intake --title "..." --body "..." --start
+```
+
+### “OpenClaw manager, the harness core changed; sync this repo”
+
+From the manager workspace:
+
+```bash
+../../scripts/task-sync-request --source-ref harness-core@abc1234
+```
+
+To open and claim it immediately:
+
+```bash
+../../scripts/task-sync-request --source-ref harness-core@abc1234 --start
 ```
 
 ### “Codex, work issue #123”

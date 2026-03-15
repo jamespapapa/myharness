@@ -31,14 +31,101 @@ harness_control_room_idle_line() {
   printf 'checked: no work (Ready queue empty)\n'
 }
 
+harness_compact_text() {
+  printf '%s' "$1" \
+    | tr '\r\n\t' '   ' \
+    | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
+}
+
+harness_truncate_text() {
+  local text max
+  text=$(harness_compact_text "${1:-}")
+  max="${2:-200}"
+
+  if (( ${#text} <= max )); then
+    printf '%s' "$text"
+    return 0
+  fi
+
+  if (( max <= 3 )); then
+    printf '%.*s' "$max" "$text"
+    return 0
+  fi
+
+  printf '%s...' "${text:0:$((max - 3))}"
+}
+
 harness_slugify() {
   printf '%s' "$1" \
     | tr '[:upper:]' '[:lower:]' \
     | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
 }
 
+harness_project_manifest_path() {
+  local root
+  root=$(harness_repo_root)
+  printf '%s\n' "$root/.harness/project.yaml"
+}
+
+harness_project_manifest_query() {
+  local query="$1"
+  local manifest
+  manifest=$(harness_project_manifest_path)
+  [[ -f "$manifest" ]] || return 1
+  jq -er "$query" "$manifest"
+}
+
+harness_resolve_path() {
+  local root="$1"
+  local path="${2:-}"
+
+  [[ -n "$path" ]] || return 1
+
+  if [[ "$path" == /* ]]; then
+    printf '%s\n' "$path"
+    return 0
+  fi
+
+  printf '%s/%s\n' "$root" "$path"
+}
+
+harness_relative_path() {
+  local from="$1"
+  local to="$2"
+
+  python3 - "$from" "$to" <<'PY'
+import os, sys
+start = os.path.abspath(sys.argv[1])
+target = os.path.abspath(sys.argv[2])
+print(os.path.relpath(target, start=start))
+PY
+}
+
+harness_project_topology_summary() {
+  local manifest
+  manifest=$(harness_project_manifest_path)
+  [[ -f "$manifest" ]] || return 1
+
+  jq -r '
+    .project.topology as $topology |
+    [
+      "Topology:",
+      "- control tower: \($topology.control_tower.transport // "unknown") / \($topology.control_tower.channel_key // "unset")",
+      "- execution slots: \($topology.execution.slot_count // 0)",
+      ($topology.execution.channels[]? | "- execution slot \(.slot // 0): \(.transport // "unknown") / \(.channel_key // "unset")"),
+      "- runner mode: \($topology.runners.mode // "unknown")",
+      ($topology.runners.entries[]? | "- runner \(.id // "unknown"): clone_root=\(.clone_root // ".") worktree_root=\(.worktree_root // ".") manager_dir=\(.manager_dir // ".harness-manager/openclaw")"),
+      "- queue default label: \($topology.queue_policy.default_label // "unset")",
+      "- queue claim source: \($topology.queue_policy.claim_source // "unset")"
+    ] | .[]
+  ' "$manifest"
+}
+
 harness_load_project_env() {
   local root config parent base
+  local manifest_project_slug manifest_control_tower_key manifest_slot_count
+  local manifest_queue_label manifest_runner_mode manifest_worktree_root
+  local manifest_manager_dir
   root=$(harness_repo_root)
   config="$root/.harness/project.env"
   if [[ -f "$config" ]]; then
@@ -46,35 +133,55 @@ harness_load_project_env() {
     source "$config"
   fi
 
+  manifest_project_slug=$(harness_project_manifest_query '.project.slug // empty' 2>/dev/null || true)
+  manifest_control_tower_key=$(harness_project_manifest_query '.project.topology.control_tower.channel_key // empty' 2>/dev/null || true)
+  manifest_slot_count=$(harness_project_manifest_query '.project.topology.execution.slot_count // empty' 2>/dev/null || true)
+  manifest_queue_label=$(harness_project_manifest_query '.project.topology.queue_policy.default_label // empty' 2>/dev/null || true)
+  manifest_runner_mode=$(harness_project_manifest_query '.project.topology.runners.mode // empty' 2>/dev/null || true)
+  manifest_worktree_root=$(harness_project_manifest_query '.project.topology.runners.entries[0].worktree_root // empty' 2>/dev/null || true)
+  manifest_manager_dir=$(harness_project_manifest_query '.project.topology.runners.entries[0].manager_dir // empty' 2>/dev/null || true)
+
   parent=$(dirname "$root")
   base=$(basename "$root")
 
+  : "${HARNESS_PROJECT_MANIFEST_FILE:=$(harness_project_manifest_path)}"
+  : "${HARNESS_PROJECT_SLUG:=$manifest_project_slug}"
   : "${HARNESS_REPO_SLUG:=}"
-  : "${HARNESS_BASE_BRANCH:=main}"
+  : "${HARNESS_INTEGRATION_BRANCH:=${HARNESS_BASE_BRANCH:-main}}"
+  : "${HARNESS_BASE_BRANCH:=$HARNESS_INTEGRATION_BRANCH}"
+  : "${HARNESS_RELEASE_BRANCH:=main}"
   : "${HARNESS_BRANCH_PREFIX:=fix/issue-}"
   : "${HARNESS_GENERIC_BRANCH_PREFIX:=task/}"
   : "${HARNESS_AGENT_DEFAULT:=codex}"
   : "${HARNESS_LOG_DIR:=$root/.harness/logs}"
-  : "${HARNESS_AUTONOMOUS_LABEL:=}"
+  : "${HARNESS_AUTONOMOUS_LABEL:=$manifest_queue_label}"
   : "${HARNESS_CRON_INTERVAL_MINUTES:=5}"
   : "${HARNESS_EXECUTOR_TIMEOUT_SECONDS:=240}"
+  : "${HARNESS_EXECUTION_SLOT_COUNT:=${manifest_slot_count:-1}}"
+  : "${HARNESS_EXECUTOR_ACTIVE_LIMIT:=$HARNESS_EXECUTION_SLOT_COUNT}"
   : "${HARNESS_REVIEW_TIMEOUT_SECONDS:=180}"
   : "${HARNESS_PREPARE_TIMEOUT_SECONDS:=300}"
   : "${HARNESS_LAND_TIMEOUT_SECONDS:=120}"
   : "${HARNESS_PREPARE_COMMANDS_FILE:=$root/.harness/prepare.commands}"
   : "${HARNESS_MERGE_METHOD:=squash}"
   : "${HARNESS_REQUIRE_GREEN_CHECKS:=0}"
+  : "${HARNESS_CONTROL_ROOM_DISCORD_WEBHOOK_URL:=}"
+  : "${HARNESS_CONTROL_TOWER_CHANNEL_KEY:=$manifest_control_tower_key}"
+  : "${HARNESS_JIRA_BASE_URL:=}"
+  : "${HARNESS_JIRA_USER_EMAIL:=}"
+  : "${HARNESS_JIRA_API_TOKEN:=}"
   : "${HARNESS_LABEL_ACTIVE:=harness:in-progress}"
   : "${HARNESS_LABEL_PR_OPEN:=harness:pr-open}"
   : "${HARNESS_LABEL_DONE:=harness:done}"
   : "${HARNESS_LABEL_BLOCKED:=harness:blocked}"
   : "${HARNESS_CLAIM_TTL_MINUTES:=240}"
-  : "${HARNESS_WORKTREE_ROOT:=$parent/$base-worktrees}"
+  : "${HARNESS_RUNNER_MODE:=${manifest_runner_mode:-single-runner}}"
+  : "${HARNESS_WORKTREE_ROOT:=$(harness_resolve_path "$root" "${manifest_worktree_root:-$parent/$base-worktrees}")}"
   : "${HARNESS_TASK_DIR:=$root/.harness/tasks}"
   : "${HARNESS_STATE_DIR:=$root/.harness/state}"
   : "${HARNESS_CLAIMS_FILE:=$HARNESS_STATE_DIR/claims.json}"
   : "${HARNESS_LOCK_DIR:=$HARNESS_STATE_DIR/.lock}"
-  : "${HARNESS_MANAGER_DIR:=$root/.harness-manager/openclaw}"
+  : "${HARNESS_MANAGER_DIR:=$(harness_resolve_path "$root" "${manifest_manager_dir:-.harness-manager/openclaw}")}"
 }
 
 harness_repo_slug() {
@@ -281,6 +388,13 @@ harness_claimed_issue_numbers_json() {
   ' "$HARNESS_CLAIMS_FILE"
 }
 
+harness_claim_json() {
+  local key
+  key="$1"
+  harness_prune_claims
+  jq -c --arg key "$key" '.[$key] // empty' "$HARNESS_CLAIMS_FILE"
+}
+
 harness_write_claim() {
   local key repo issue_number task_id branch worktree agent status now epoch had_lock
   key="$1"
@@ -321,6 +435,48 @@ harness_write_claim() {
         claimed_at: $claimed_at,
         claimed_epoch: $claimed_epoch
       }
+    ' "$HARNESS_CLAIMS_FILE" >"$HARNESS_CLAIMS_FILE.tmp"
+  mv "$HARNESS_CLAIMS_FILE.tmp" "$HARNESS_CLAIMS_FILE"
+  if [[ "$had_lock" != "1" ]]; then
+    harness_release_lock
+  fi
+}
+
+harness_update_claim_status() {
+  local key status note worker_log worker_exit now epoch had_lock
+  key="$1"
+  status="$2"
+  note="${3:-}"
+  worker_log="${4:-}"
+  worker_exit="${5:-}"
+
+  harness_load_project_env
+  harness_prepare_state
+  had_lock="${HARNESS_LOCK_HELD:-0}"
+  harness_acquire_lock
+  now=$(harness_now_utc)
+  epoch=$(date -u +%s)
+
+  jq \
+    --arg key "$key" \
+    --arg status "$status" \
+    --arg note "$note" \
+    --arg worker_log "$worker_log" \
+    --arg worker_exit "$worker_exit" \
+    --arg updated_at "$now" \
+    --argjson updated_epoch "$epoch" '
+      if has($key) then
+        .[$key] |= (
+          .status = $status
+          | .updated_at = $updated_at
+          | .updated_epoch = $updated_epoch
+          | if ($note | length) > 0 then .note = $note else . end
+          | if ($worker_log | length) > 0 then .worker_log = $worker_log else . end
+          | if ($worker_exit | length) > 0 then .worker_exit = $worker_exit else . end
+        )
+      else
+        .
+      end
     ' "$HARNESS_CLAIMS_FILE" >"$HARNESS_CLAIMS_FILE.tmp"
   mv "$HARNESS_CLAIMS_FILE.tmp" "$HARNESS_CLAIMS_FILE"
   if [[ "$had_lock" != "1" ]]; then
@@ -391,6 +547,55 @@ harness_task_field() {
   jq -r "$field" "$(harness_task_status_path "$task_id")"
 }
 
+harness_task_review_rework_attempts() {
+  local task_id
+  task_id="$1"
+  harness_task_field "$task_id" '.review_rework_attempts // 0'
+}
+
+harness_task_review_rework_limit() {
+  local task_id
+  task_id="$1"
+  harness_task_field "$task_id" '.review_rework_limit // 3'
+}
+
+harness_set_task_review_state() {
+  local task_id verdict rework_attempts status_file now had_lock
+  task_id="$1"
+  verdict="$2"
+  rework_attempts="${3:-}"
+
+  harness_load_project_env
+  harness_prepare_state
+  had_lock="${HARNESS_LOCK_HELD:-0}"
+  harness_acquire_lock
+  status_file=$(harness_task_status_path "$task_id")
+  if [[ ! -f "$status_file" ]]; then
+    if [[ "$had_lock" != "1" ]]; then
+      harness_release_lock
+    fi
+    return 0
+  fi
+
+  if [[ -z "$rework_attempts" ]]; then
+    rework_attempts=$(jq -r '.review_rework_attempts // 0' "$status_file")
+  fi
+
+  now=$(harness_now_utc)
+  jq \
+    --arg verdict "$verdict" \
+    --arg updated_at "$now" \
+    --argjson rework_attempts "$rework_attempts" '
+      .updated_at = $updated_at
+      | .last_review_verdict = $verdict
+      | .review_rework_attempts = $rework_attempts
+    ' "$status_file" >"$status_file.tmp"
+  mv "$status_file.tmp" "$status_file"
+  if [[ "$had_lock" != "1" ]]; then
+    harness_release_lock
+  fi
+}
+
 harness_find_next_task_by_status() {
   local status files_json
   status="$1"
@@ -414,6 +619,25 @@ harness_find_next_task_by_status() {
   fi
 
   printf '%s\n' "$files_json"
+}
+
+harness_count_tasks_by_status() {
+  local status
+  status="$1"
+
+  harness_load_project_env
+  shopt -s nullglob
+  local files=("$HARNESS_TASK_DIR"/*/task.json)
+  shopt -u nullglob
+  if [[ "${#files[@]}" -eq 0 ]]; then
+    printf '0\n'
+    return 0
+  fi
+
+  jq -s --arg status "$status" '
+    map(select(.status == $status))
+    | length
+  ' "${files[@]}"
 }
 
 harness_artifact_dir() {
@@ -522,7 +746,7 @@ harness_pr_number_from_url() {
 harness_fetch_pr_json() {
   local pr_ref
   pr_ref="$1"
-  gh pr view "$pr_ref" --json number,title,url,state,isDraft,baseRefName,headRefName,headRefOid,statusCheckRollup,files,mergeStateStatus
+  gh pr view "$pr_ref" --json number,title,url,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,statusCheckRollup,files,mergeStateStatus
 }
 
 harness_task_pr_json() {
@@ -541,10 +765,20 @@ harness_issue_files_docs_only_from_pr_json() {
     | length > 0
     and all(
       .[];
-      test("(^|/)(README|CHANGELOG|AGENTS)\\.md$")
-      or test("\\.md$")
-      or test("^ops/")
-      or test("^\\.omx/plans/")
+      (
+        test("^\\.harness/")
+        or test("^\\.harness-manager/")
+        or test("(^|/)AGENTS\\.md$")
+        or test("(^|/)CLAUDE\\.md$")
+      )
+      | not
+      and (
+        test("(^|/)(README|CHANGELOG)\\.md$")
+        or test("\\.md$")
+        or test("^ops/")
+        or test("^\\.omx/plans/")
+        or test("^artifacts/")
+      )
     )
   ' >/dev/null 2>&1
 }
@@ -569,6 +803,278 @@ harness_run_prepare_commands() {
       return 1
     fi
   done <"$commands_file"
+}
+
+harness_extract_jira_issue_key_from_text() {
+  local text line key
+  text="${1:-}"
+  [[ -n "$text" ]] || return 1
+
+  line=$(printf '%s\n' "$text" | grep -im1 -E '^[[:space:]>*-]*jira([[:space:]]+issue)?[[:space:]]*:' || true)
+  if [[ -n "$line" ]]; then
+    key=$(printf '%s\n' "$line" | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | head -n 1 || true)
+    if [[ -n "$key" ]]; then
+      printf '%s\n' "$key"
+      return 0
+    fi
+  fi
+
+  key=$(printf '%s\n' "$text" \
+    | grep -oE 'https?://[^[:space:]]+/browse/[A-Z][A-Z0-9]+-[0-9]+' \
+    | sed -E 's#.*/browse/([A-Z][A-Z0-9]+-[0-9]+)$#\1#' \
+    | head -n 1 || true)
+  [[ -n "$key" ]] || return 1
+  printf '%s\n' "$key"
+}
+
+harness_jira_issue_url() {
+  local issue_key base_url
+  issue_key="${1:-}"
+
+  harness_load_project_env
+  base_url="${HARNESS_JIRA_BASE_URL%/}"
+  [[ -n "$issue_key" && -n "$base_url" ]] || return 1
+  printf '%s/browse/%s\n' "$base_url" "$issue_key"
+}
+
+harness_can_sync_jira() {
+  harness_load_project_env
+  command -v curl >/dev/null 2>&1 || return 1
+  [[ -n "${HARNESS_JIRA_BASE_URL:-}" ]] || return 1
+  [[ -n "${HARNESS_JIRA_USER_EMAIL:-}" ]] || return 1
+  [[ -n "${HARNESS_JIRA_API_TOKEN:-}" ]] || return 1
+}
+
+harness_stage_status_id() {
+  local stage event
+  stage="${1:-}"
+  event="${2:-}"
+
+  case "$stage:$event" in
+    claim:started) printf 'claim_started\n' ;;
+    executor:started) printf 'executor_started\n' ;;
+    executor:reconciled_to_pr) printf 'executor_reconciled_to_pr\n' ;;
+    executor:blocked) printf 'executor_blocked\n' ;;
+    review:approved) printf 'review_approved\n' ;;
+    review:rework) printf 'review_rework\n' ;;
+    review:rejected) printf 'review_rejected\n' ;;
+    review:blocked) printf 'review_blocked\n' ;;
+    prepare:passed) printf 'prepare_passed\n' ;;
+    prepare:failed) printf 'prepare_failed\n' ;;
+    prepare:blocked) printf 'prepare_blocked\n' ;;
+    land:merged) printf 'land_merged\n' ;;
+    land:failed) printf 'land_failed\n' ;;
+    land:blocked) printf 'land_blocked\n' ;;
+    *)
+      harness_die "unsupported stage summary event: $stage/$event"
+      ;;
+  esac
+}
+
+harness_stage_label() {
+  local stage_id
+  stage_id="${1:-}"
+
+  case "$stage_id" in
+    claim_started) printf 'claim started\n' ;;
+    executor_started) printf 'executor started\n' ;;
+    executor_reconciled_to_pr) printf 'executor reconciled to PR\n' ;;
+    executor_blocked) printf 'executor blocked\n' ;;
+    review_approved) printf 'review approved\n' ;;
+    review_rework) printf 'review rework\n' ;;
+    review_rejected) printf 'review rejected\n' ;;
+    review_blocked) printf 'review blocked\n' ;;
+    prepare_passed) printf 'prepare passed\n' ;;
+    prepare_failed) printf 'prepare failed\n' ;;
+    prepare_blocked) printf 'prepare blocked\n' ;;
+    land_merged) printf 'land merged\n' ;;
+    land_failed) printf 'land failed\n' ;;
+    land_blocked) printf 'land blocked\n' ;;
+    *)
+      harness_die "unsupported stage label: $stage_id"
+      ;;
+  esac
+}
+
+harness_stage_operator_action() {
+  local stage_id
+  stage_id="${1:-}"
+
+  case "$stage_id" in
+    executor_blocked)
+      printf 'Inspect the worker outcome, then rerun or requeue the task.'
+      ;;
+    review_rework)
+      printf ''
+      ;;
+    review_rejected)
+      printf 'Inspect the review findings, then revise the PR or close the task.'
+      ;;
+    review_blocked)
+      printf 'Inspect the review run, then rerun review or fix the PR.'
+      ;;
+    prepare_failed|prepare_blocked)
+      printf 'Fix the failing verification gate or blocker, then rerun prepare.'
+      ;;
+    land_failed|land_blocked)
+      printf 'Resolve the merge or checks blocker, then rerun land.'
+      ;;
+    *)
+      printf ''
+      ;;
+  esac
+}
+
+harness_jira_comment() {
+  local issue_key body payload auth_header base_url
+  issue_key="$1"
+  body="$2"
+
+  harness_can_sync_jira || return 1
+  [[ -n "$issue_key" ]] || return 1
+
+  payload=$(jq -nc --arg body "$body" '{body:$body}')
+  auth_header=$(printf '%s:%s' "$HARNESS_JIRA_USER_EMAIL" "$HARNESS_JIRA_API_TOKEN" | base64 | tr -d '\n')
+  base_url="${HARNESS_JIRA_BASE_URL%/}"
+
+  curl -fsS \
+    -H "Authorization: Basic $auth_header" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -X POST \
+    -d "$payload" \
+    "$base_url/rest/api/2/issue/$issue_key/comment" >/dev/null
+}
+
+harness_sync_jira_stage_summary() {
+  local task_id stage_id happened pr_url blocked_reason next_action task_json jira_issue_key issue_number repo_slug issue_reference comment_body issue_body
+  task_id="$1"
+  stage_id="$2"
+  happened="${3:-}"
+  pr_url="${4:-}"
+  blocked_reason="${5:-}"
+  next_action="${6:-}"
+
+  harness_can_sync_jira || return 0
+  harness_task_exists "$task_id" || return 0
+
+  task_json=$(harness_task_json "$task_id")
+  jira_issue_key=$(printf '%s' "$task_json" | jq -r '.jira_issue_key // ""')
+  if [[ -z "$jira_issue_key" ]]; then
+    issue_body=$(printf '%s' "$task_json" | jq -r '.issue_body // ""')
+    jira_issue_key=$(harness_extract_jira_issue_key_from_text "$issue_body" 2>/dev/null || true)
+  fi
+  [[ -n "$jira_issue_key" ]] || return 0
+
+  issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
+  repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
+  issue_reference=$(harness_control_room_reference "$task_id" "$issue_number" "$repo_slug")
+
+  happened=$(harness_truncate_text "$happened" 320)
+  blocked_reason=$(harness_truncate_text "$blocked_reason" 220)
+  next_action=$(harness_truncate_text "$next_action" 220)
+
+  comment_body=$(
+    cat <<EOF
+Harness stage update
+
+- task: \`$task_id\`
+- issue: \`$issue_reference\`
+- stage: \`$(harness_stage_label "$stage_id")\`
+- happened: $happened
+$(if [[ -n "$pr_url" ]]; then printf -- '- pr: %s\n' "$pr_url"; fi)$(if [[ -n "$blocked_reason" ]]; then printf -- '- blocked_reason: %s\n' "$blocked_reason"; fi)$(if [[ -n "$next_action" ]]; then printf -- '- operator_action: %s\n' "$next_action"; fi)
+EOF
+  )
+
+  if ! harness_jira_comment "$jira_issue_key" "$comment_body"; then
+    harness_notice "jira comment sync failed for $jira_issue_key ($stage_id)"
+  fi
+}
+
+harness_record_stage_summary() {
+  local task_id stage event happened pr_url blocked_reason next_action stage_id task_json status_file summary_json now had_lock issue_number repo_slug issue_reference jira_issue_key issue_body
+  task_id="$1"
+  stage="$2"
+  event="$3"
+  happened="${4:-}"
+  pr_url="${5:-}"
+  blocked_reason="${6:-}"
+  next_action="${7:-}"
+
+  harness_load_project_env
+  harness_prepare_state
+  harness_task_exists "$task_id" || return 0
+
+  stage_id=$(harness_stage_status_id "$stage" "$event")
+  if [[ -z "$next_action" ]]; then
+    next_action=$(harness_stage_operator_action "$stage_id")
+  fi
+
+  had_lock="${HARNESS_LOCK_HELD:-0}"
+  harness_acquire_lock
+  status_file=$(harness_task_status_path "$task_id")
+  if [[ ! -f "$status_file" ]]; then
+    if [[ "$had_lock" != "1" ]]; then
+      harness_release_lock
+    fi
+    return 0
+  fi
+
+  task_json=$(cat "$status_file")
+  issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
+  repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
+  jira_issue_key=$(printf '%s' "$task_json" | jq -r '.jira_issue_key // ""')
+  if [[ -z "$jira_issue_key" ]]; then
+    issue_body=$(printf '%s' "$task_json" | jq -r '.issue_body // ""')
+    jira_issue_key=$(harness_extract_jira_issue_key_from_text "$issue_body" 2>/dev/null || true)
+  fi
+  issue_reference=$(harness_control_room_reference "$task_id" "$issue_number" "$repo_slug")
+  now=$(harness_now_utc)
+
+  summary_json=$(jq -nc \
+    --arg recorded_at "$now" \
+    --arg stage "$stage" \
+    --arg event "$event" \
+    --arg stage_id "$stage_id" \
+    --arg task_id "$task_id" \
+    --arg issue_reference "$issue_reference" \
+    --arg repo_slug "$repo_slug" \
+    --arg jira_issue_key "$jira_issue_key" \
+    --arg pr_url "$pr_url" \
+    --arg happened "$happened" \
+    --arg blocked_reason "$blocked_reason" \
+    --arg next_action "$next_action" \
+    --argjson issue_number "${issue_number:-null}" \
+    '{
+      recorded_at: $recorded_at,
+      stage: $stage,
+      event: $event,
+      stage_id: $stage_id,
+      task_id: $task_id,
+      issue_number: $issue_number,
+      repo_slug: $repo_slug,
+      issue_reference: $issue_reference,
+      jira_issue_key: $jira_issue_key,
+      pr_url: $pr_url,
+      happened: $happened,
+      blocked_reason: $blocked_reason,
+      next_action: $next_action
+    }')
+
+  jq \
+    --arg updated_at "$now" \
+    --argjson summary "$summary_json" '
+      .updated_at = $updated_at
+      | .last_stage_summary = $summary
+      | .stage_summaries = ((.stage_summaries // []) + [$summary])
+    ' "$status_file" >"$status_file.tmp"
+  mv "$status_file.tmp" "$status_file"
+
+  if [[ "$had_lock" != "1" ]]; then
+    harness_release_lock
+  fi
+
+  harness_sync_jira_stage_summary "$task_id" "$stage_id" "$happened" "$pr_url" "$blocked_reason" "$next_action"
 }
 
 harness_status_check_summary() {
@@ -655,6 +1161,97 @@ harness_issue_comment() {
   gh issue comment "$issue_number" -R "$repo" --body "$body" >/dev/null
 }
 
+harness_control_room_reference() {
+  local task_id issue_number repo_slug reference
+  task_id="${1:-}"
+  issue_number="${2:-}"
+  repo_slug="${3:-}"
+
+  if [[ -n "$repo_slug" && -n "$issue_number" ]]; then
+    reference="$repo_slug#$issue_number"
+  elif [[ -n "$issue_number" ]]; then
+    reference="issue #$issue_number"
+  elif [[ -n "$task_id" ]]; then
+    reference="task $task_id"
+  else
+    reference="task"
+  fi
+
+  if [[ -n "$task_id" ]]; then
+    case "$reference" in
+      *"$task_id"*) ;;
+      *) reference="$reference / $task_id" ;;
+    esac
+  fi
+
+  printf '%s\n' "$reference"
+}
+
+harness_control_room_default_action() {
+  local outcome lane task_id
+  outcome="${1:-}"
+  lane="${2:-}"
+  task_id="${3:-}"
+
+  case "$outcome:$lane" in
+    blocked:executor)
+      printf 'inspect the worker log and decide whether to resume or requeue'
+      ;;
+    blocked:review)
+      printf 'inspect artifacts/reviews/%s and the review run log, then rerun or fix the PR' "$task_id"
+      ;;
+    blocked:prepare)
+      printf 'inspect artifacts/prep/%s and fix the failing gate before rerunning prepare' "$task_id"
+      ;;
+    blocked:land)
+      printf 'inspect PR checks or merge state, then rerun land when the PR is ready'
+      ;;
+    rejected:review)
+      printf 'inspect artifacts/reviews/%s and decide whether to revise the PR or close the task' "$task_id"
+      ;;
+    *)
+      printf ''
+      ;;
+  esac
+}
+
+harness_control_room_notify() {
+  local outcome lane task_id issue_number repo_slug reason next_action webhook_url reference message payload
+  outcome="${1:-}"
+  lane="${2:-}"
+  task_id="${3:-}"
+  issue_number="${4:-}"
+  repo_slug="${5:-}"
+  reason="${6:-}"
+  next_action="${7:-}"
+
+  harness_load_project_env
+  webhook_url="${HARNESS_CONTROL_ROOM_DISCORD_WEBHOOK_URL:-}"
+  [[ -n "$webhook_url" ]] || return 0
+
+  if ! command -v curl >/dev/null 2>&1; then
+    harness_notice "control-room webhook skipped: curl not found"
+    return 0
+  fi
+
+  reason=$(harness_truncate_text "$reason" 280)
+  if [[ -z "$next_action" ]]; then
+    next_action=$(harness_control_room_default_action "$outcome" "$lane" "$task_id")
+  fi
+  next_action=$(harness_truncate_text "$next_action" 220)
+  reference=$(harness_control_room_reference "$task_id" "$issue_number" "$repo_slug")
+
+  message="[$outcome][$lane] $reference | reason: $reason"
+  if [[ -n "$next_action" ]]; then
+    message="$message | next: $next_action"
+  fi
+
+  payload=$(jq -nc --arg content "$message" '{content:$content}')
+  if ! curl -fsS -H "Content-Type: application/json" -X POST -d "$payload" "$webhook_url" >/dev/null; then
+    harness_notice "control-room webhook post failed for $reference ($outcome/$lane)"
+  fi
+}
+
 harness_issue_started() {
   local repo issue_number task_id branch worktree login
   repo="$1"
@@ -714,6 +1311,23 @@ harness_issue_blocked() {
     "Harness status update: blocked.\n\n- reason: $reason"
 }
 
+harness_issue_rejected() {
+  local repo issue_number reason
+  repo="$1"
+  issue_number="$2"
+  reason="$3"
+
+  harness_load_project_env
+  harness_ensure_status_labels "$repo"
+  gh issue edit "$issue_number" -R "$repo" \
+    --remove-label "$HARNESS_LABEL_ACTIVE" \
+    --remove-label "$HARNESS_LABEL_BLOCKED" \
+    --add-label "$HARNESS_LABEL_PR_OPEN" >/dev/null 2>&1 || true
+
+  harness_issue_comment "$repo" "$issue_number" \
+    "Harness status update: rejected.\n\n- reason: $reason"
+}
+
 harness_issue_done() {
   local repo issue_number pr_url
   repo="$1"
@@ -748,16 +1362,21 @@ harness_issue_unclaim() {
   harness_issue_comment "$repo" "$issue_number" "Harness claim cleared."
 }
 
+harness_remote_branch_ref() {
+  local base
+  base="${1:-$HARNESS_BASE_BRANCH}"
+  printf 'origin/%s\n' "$base"
+}
+
 harness_ensure_base_branch() {
-  local root base
+  local root base remote_ref
   root=$(harness_repo_root)
   base="${1:-$HARNESS_BASE_BRANCH}"
+  remote_ref="refs/remotes/origin/$base"
 
-  if git -C "$root" show-ref --verify --quiet "refs/heads/$base"; then
-    return 0
-  fi
-
-  git -C "$root" fetch origin "$base:$base" >/dev/null
+  git -C "$root" fetch origin "$base" >/dev/null
+  git -C "$root" show-ref --verify --quiet "$remote_ref" \
+    || harness_die "remote base branch not found after fetch: origin/$base"
 }
 
 harness_fetch_issue_json() {

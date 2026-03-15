@@ -8,40 +8,66 @@ source "$SCRIPT_DIR/harness-lib.sh"
 
 harness_load_project_env
 repo_root=$(harness_repo_root)
+manager_dir="$HARNESS_MANAGER_DIR"
+scripts_rel=$(harness_relative_path "$manager_dir" "$repo_root/scripts")
+ops_rel=$(harness_relative_path "$manager_dir" "$repo_root/ops")
+harness_rel=$(harness_relative_path "$manager_dir" "$repo_root/.harness")
+manager_template="$repo_root/.harness/profiles/openclaw-manager/AGENTS.md"
 
-mkdir -p "$HARNESS_MANAGER_DIR"
-cp "$repo_root/.harness/profiles/openclaw-manager/AGENTS.md" "$HARNESS_MANAGER_DIR/AGENTS.md"
+mkdir -p "$manager_dir"
+python3 - "$manager_template" "$manager_dir/AGENTS.md" "$scripts_rel" "$ops_rel" "$harness_rel" <<'PY'
+from pathlib import Path
+import sys
+src = Path(sys.argv[1]).read_text()
+out = src.replace('__SCRIPTS_DIR__', sys.argv[3]).replace('__OPS_DIR__', sys.argv[4]).replace('__HARNESS_DIR__', sys.argv[5])
+Path(sys.argv[2]).write_text(out)
+PY
 
-cat >"$HARNESS_MANAGER_DIR/START.md" <<EOF
+cat >"$manager_dir/START.md" <<EOF
 # OpenClaw Manager Workspace
 
 Run OpenClaw from this directory:
 
 \`\`\`bash
-cd "$HARNESS_MANAGER_DIR"
+cd "$manager_dir"
 openclaw
 \`\`\`
 
 Primary commands:
 
-- create issue: \`../../scripts/task-intake --title "<title>" --body "<body>"\`
-- create and start: \`../../scripts/task-intake --title "<title>" --body "<body>" --start\`
-- next issue: \`../../scripts/task-next\`
-- autonomous worker tick: \`../../scripts/task-run-once\`
-- review lane tick: \`../../scripts/task-review-once\`
-- prepare lane tick: \`../../scripts/task-prepare-once\`
-- land lane tick: \`../../scripts/task-land-once\`
-- start next issue: \`../../scripts/task-start --next\`
-- start explicit issue: \`../../scripts/task-start --issue <n>\`
-- mark PR open: \`../../scripts/task-finish --issue <n> --pr <url>\`
-- mark blocked: \`../../scripts/task-finish --issue <n> --blocked "<reason>"\`
-- mark merged: \`../../scripts/task-finish --issue <n> --merged --pr <url>\`
+- create issue: \`${scripts_rel}/task-intake --title "<title>" --body "<body>"\`
+- request harness sync: \`${scripts_rel}/task-sync-request --source-ref "<core-ref>"\`
+- request harness sync and start: \`${scripts_rel}/task-sync-request --source-ref "<core-ref>" --start\`
+- create and start: \`${scripts_rel}/task-intake --title "<title>" --body "<body>" --start\`
+- next issue: \`${scripts_rel}/task-next\`
+- repo wake tick: \`${scripts_rel}/task-control-room-once\`
+- autonomous worker tick: \`${scripts_rel}/task-run-once\`
+- review lane tick: \`${scripts_rel}/task-review-once\`
+- prepare lane tick: \`${scripts_rel}/task-prepare-once\`
+- land lane tick: \`${scripts_rel}/task-land-once\`
+- start next issue: \`${scripts_rel}/task-start --next\`
+- start explicit issue: \`${scripts_rel}/task-start --issue <n>\`
+- mark PR open: \`${scripts_rel}/task-finish --issue <n> --pr <url>\`
+- mark blocked: \`${scripts_rel}/task-finish --issue <n> --blocked "<reason>"\`
+- mark merged: \`${scripts_rel}/task-finish --issue <n> --merged --pr <url>\`
 
 Manual:
 
-- \`../../ops/HARNESS_ADMIN.md\`
-- \`../../ops/AUTONOMOUS_SWARM.md\`
+- \`${ops_rel}/HARNESS_ADMIN.md\`
+- \`${ops_rel}/AUTONOMOUS_SWARM.md\`
 EOF
+
+cat >>"$manager_dir/START.md" <<EOF
+
+Project overlay:
+
+- \`${harness_rel}/project.yaml\`
+- \`${harness_rel}/project.env\`
+EOF
+
+if topology_summary=$(harness_project_topology_summary 2>/dev/null); then
+  printf '\n%s\n' "$topology_summary" >>"$HARNESS_MANAGER_DIR/START.md"
+fi
 
 printf 'manager workspace ready: %s\n' "$HARNESS_MANAGER_DIR"
 printf 'launch with:\n'

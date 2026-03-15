@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=./harness-lib.sh
+source "$SCRIPT_DIR/harness-lib.sh"
+
+log_file=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --log-file)
+      log_file="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      echo "usage: scripts/task-control-room-once [--log-file <path>]"
+      exit 0
+      ;;
+    *)
+      harness_die "unknown argument: $1"
+      ;;
+  esac
+done
+
+harness_load_project_env
+harness_prepare_state
+[[ -n "$log_file" ]] || log_file="$HARNESS_LOG_DIR/task-control-room-once.jsonl"
+
+emit_log() {
+  jq -nc \
+    --arg ts "$(harness_now_utc)" \
+    --arg status "$1" \
+    --arg lane "$2" \
+    --arg task_id "${3:-}" \
+    --arg detail "${4:-}" \
+    '{ts:$ts,status:$status,lane:$lane,task_id:$task_id,detail:$detail}' >>"$log_file"
+}
+
+status_from_output() {
+  local output="$1"
+  local exit_code="$2"
+
+  case "$output" in
+    idle:*) printf 'idle\n' ;;
+    waiting:*) printf 'waiting\n' ;;
+    success:*) printf 'success\n' ;;
+    blocked:*) printf 'blocked\n' ;;
+    error:*) printf 'error\n' ;;
+    *)
+      case "$exit_code" in
+        0) printf 'success\n' ;;
+        2) printf 'blocked\n' ;;
+        *) printf 'error\n' ;;
+      esac
+      ;;
+  esac
+}
+
+run_lane_once() {
+  local lane="$1"
+  local task_status="$2"
+  local command_path="$3"
+  local next_task=""
+  local output exit_code
+
+  lane_task_id=""
+  lane_output=""
+  lane_exit=0
+  lane_status=""
+
+  if [[ -n "$task_status" ]]; then
+    next_task=$(harness_find_next_task_by_status "$task_status" || true)
+    if [[ -n "$next_task" ]]; then
+      lane_task_id=$(printf '%s' "$next_task" | jq -r '.task_id')
+    fi
+  fi
+
+  if output=$("$command_path" 2>&1); then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+
+  lane_output="$output"
+  lane_exit="$exit_code"
+  lane_status=$(status_from_output "$output" "$exit_code")
+}
+
+print_and_exit() {
+  local lane="$1"
+  local task_id="$2"
+  local output="$3"
+  local status="$4"
+  local exit_code="$5"
+
+  emit_log "$status" "$lane" "$task_id" "$output"
+  printf '%s\n' "$output"
+  if [[ "$status" == "error" && "$exit_code" -eq 0 ]]; then
+    exit 1
+  fi
+  exit "$exit_code"
+}
+
+run_lane_once "land" "prepared" "$SCRIPT_DIR/task-land-once"
+if [[ "$lane_status" != "idle" ]]; then
+  print_and_exit "land" "$lane_task_id" "$lane_output" "$lane_status" "$lane_exit"
+fi
+
+run_lane_once "prepare" "reviewed" "$SCRIPT_DIR/task-prepare-once"
+if [[ "$lane_status" != "idle" ]]; then
+  print_and_exit "prepare" "$lane_task_id" "$lane_output" "$lane_status" "$lane_exit"
+fi
+
+run_lane_once "review" "pr_open" "$SCRIPT_DIR/task-review-once"
+if [[ "$lane_status" != "idle" ]]; then
+  print_and_exit "review" "$lane_task_id" "$lane_output" "$lane_status" "$lane_exit"
+fi
+
+run_lane_once "executor" "" "$SCRIPT_DIR/task-run-once"
+print_and_exit "executor" "$lane_task_id" "$lane_output" "$lane_status" "$lane_exit"

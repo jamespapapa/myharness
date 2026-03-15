@@ -3,17 +3,44 @@
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-if common_git_dir=$(git -C "$script_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
-  root=$(dirname "$common_git_dir")
-else
-  root=$(git -C "$script_dir" rev-parse --show-toplevel)
-fi
+root=$(git -C "$script_dir" rev-parse --show-toplevel)
 cd "$root"
 
+skip_doc_coverage=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --skip-doc-coverage)
+      skip_doc_coverage=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+usage: scripts/check-harness [--skip-doc-coverage]
+EOF
+      exit 0
+      ;;
+    *)
+      printf 'unknown argument: %s\n' "$1" >&2
+      exit 1
+      ;;
+  esac
+done
+
 scripts=(
+  scripts/check-doc-coverage
   scripts/harness-lib.sh
   scripts/check-harness
+  scripts/check-project-manifest
+  scripts/check-manager-workspace
+  scripts/check-sync-request
+  scripts/check-control-room-notifications
+  scripts/check-review-outcomes
+  scripts/check-stage-reporting
+  scripts/check-task-control-room-once
+  scripts/check-task-run-once
   scripts/openclaw-manager-setup
+  scripts/task-control-room-once
   scripts/task-create
   scripts/task-finish
   scripts/task-intake
@@ -26,7 +53,20 @@ scripts=(
   scripts/task-review-once
   scripts/task-run-once
   scripts/task-start
+  scripts/task-sync-request
 )
 
 bash -n "${scripts[@]}"
+if [[ "$skip_doc_coverage" -eq 0 ]]; then
+  scripts/check-doc-coverage
+fi
+scripts/check-doc-coverage --self-test
+scripts/check-project-manifest
+scripts/check-manager-workspace
+scripts/check-sync-request
+scripts/check-control-room-notifications
+scripts/check-review-outcomes
+scripts/check-stage-reporting
+scripts/check-task-control-room-once
+scripts/check-task-run-once
 printf 'check-harness passed\n'

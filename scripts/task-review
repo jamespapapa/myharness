@@ -15,7 +15,10 @@ cleanup_review() {
 
   current_status=$(harness_task_field "$task_id" '.status // ""' 2>/dev/null || true)
   if [[ "$current_status" == "reviewing" ]]; then
-    harness_update_task_status "$task_id" "review_failed" "review script aborted unexpectedly" "${pr_url:-}"
+    harness_update_task_status "$task_id" "blocked" "review script aborted unexpectedly" "${pr_url:-}"
+    harness_set_task_review_state "$task_id" "blocked"
+    harness_record_stage_summary "$task_id" "review" "blocked" "Review aborted before producing a final verdict." "${pr_url:-}" "review script aborted unexpectedly"
+    harness_control_room_notify "blocked" "review" "$task_id" "${issue_number:-}" "${repo_slug:-}" "review script aborted unexpectedly"
   fi
 }
 
@@ -76,6 +79,8 @@ worktree=$(printf '%s' "$task_json" | jq -r '.worktree')
 title=$(printf '%s' "$task_json" | jq -r '.title')
 issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // empty')
 repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
+rework_attempts=$(harness_task_review_rework_attempts "$task_id")
+rework_limit=$(harness_task_review_rework_limit "$task_id")
 
 [[ -n "$pr_url" ]] || harness_die "task $task_id has no pr_url"
 
@@ -84,6 +89,7 @@ pr_number=$(printf '%s' "$pr_json" | jq -r '.number')
 pr_state=$(printf '%s' "$pr_json" | jq -r '.state')
 is_draft=$(printf '%s' "$pr_json" | jq -r '.isDraft')
 base_ref=$(printf '%s' "$pr_json" | jq -r '.baseRefName')
+base_sha=$(printf '%s' "$pr_json" | jq -r '.baseRefOid')
 head_ref=$(printf '%s' "$pr_json" | jq -r '.headRefName')
 head_sha=$(printf '%s' "$pr_json" | jq -r '.headRefOid')
 
@@ -102,7 +108,8 @@ review_session="$artifact_dir/session"
 mkdir -p "$review_session"
 diff_patch="$review_session/DIFF.patch"
 cp "$(harness_repo_root)/.harness/profiles/codex-review/AGENTS.md" "$review_session/AGENTS.md"
-git -C "$worktree" diff --unified=40 "$base_ref...$head_sha" >"$diff_patch"
+harness_ensure_base_branch "$base_ref"
+git -C "$worktree" diff --unified=40 "$base_sha...$head_sha" >"$diff_patch"
 
 cat >"$review_session/REVIEW_TASK.md" <<EOF
 # Review Task
@@ -113,15 +120,18 @@ cat >"$review_session/REVIEW_TASK.md" <<EOF
 - pr_url: $pr_url
 - worktree: \`$worktree\`
 - base_ref: \`$base_ref\`
+- base_sha: \`$base_sha\`
 - head_ref: \`$head_ref\`
 - head_sha: \`$head_sha\`
+- current_rework_attempts: \`$rework_attempts\`
+- rework_limit: \`$rework_limit\`
 - artifact_markdown: \`$review_md\`
 - artifact_json: \`$review_json\`
 - diff_patch: \`$diff_patch\`
 
 ## Mission
 
-Review the current PR head against \`$base_ref\` with a code review mindset.
+Review the current PR head against base commit \`$base_sha\` on \`$base_ref\` with a code review mindset.
 
 Primary inputs for this review:
 
@@ -137,13 +147,20 @@ Focus on:
 - missing tests or proof,
 - merge risk.
 
+Verdict guidance:
+
+- \`approved\`: ready for prepare as-is
+- \`rework\`: findings look repairable inside the same task / PR branch without operator help
+- \`rejected\`: current approach should be discarded instead of retried automatically
+- \`blocked\`: human attention, missing inputs, or an external decision is required
+
 Do not edit code. Do not change git state. Write artifacts only.
 
 ## Required Markdown Artifact
 
 Write \`$review_md\` with:
 
-1. Verdict: \`approved\` or \`rejected\`
+1. Verdict: \`approved\`, \`rework\`, \`rejected\`, or \`blocked\`
 2. Short summary
 3. Findings
 4. Residual risks
@@ -158,16 +175,17 @@ Write \`$review_json\` with this exact schema:
   "issue_number": ${issue_number:-null},
   "pr_number": $pr_number,
   "pr_url": "$pr_url",
+  "reviewed_base_sha": "$base_sha",
   "reviewed_head_sha": "$head_sha",
   "reviewed_at": "ISO-8601 UTC timestamp",
-  "verdict": "approved or rejected",
+  "verdict": "approved | rework | rejected | blocked",
   "summary": "short summary",
   "blocking_findings": ["..."],
   "residual_risks": ["..."]
 }
 \`\`\`
 
-If the PR should not land, set \`verdict\` to \`rejected\` and explain why.
+If the PR should not land, choose the narrowest valid verdict and explain why.
 EOF
 
 review_prompt=$(cat <<EOF
@@ -196,7 +214,10 @@ if [[ "$review_exit" -ne 0 ]]; then
   else
     review_reason="review runtime failed; see $review_log"
   fi
-  harness_update_task_status "$task_id" "review_failed" "$review_reason" "$pr_url"
+  harness_update_task_status "$task_id" "blocked" "$review_reason" "$pr_url"
+  harness_set_task_review_state "$task_id" "blocked"
+  harness_record_stage_summary "$task_id" "review" "blocked" "Review could not produce a valid artifact." "$pr_url" "$review_reason"
+  harness_control_room_notify "blocked" "review" "$task_id" "$issue_number" "$repo_slug" "$review_reason"
   if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
     harness_issue_blocked "$repo_slug" "$issue_number" "$review_reason"
   fi
@@ -207,16 +228,18 @@ fi
 [[ -s "$review_json" ]] || harness_die "missing review json: $review_json"
 
 verdict=$(jq -r '.verdict' "$review_json")
+reviewed_base_sha=$(jq -r '.reviewed_base_sha' "$review_json")
 reviewed_head_sha=$(jq -r '.reviewed_head_sha' "$review_json")
 summary=$(jq -r '.summary // ""' "$review_json")
 
 current_pr_json=$(harness_fetch_pr_json "$pr_url")
+current_base_sha=$(printf '%s' "$current_pr_json" | jq -r '.baseRefOid')
 current_head_sha=$(printf '%s' "$current_pr_json" | jq -r '.headRefOid')
 
-if [[ "$reviewed_head_sha" != "$head_sha" || "$current_head_sha" != "$head_sha" ]]; then
-  harness_update_task_status "$task_id" "pr_open" "review artifact stale; PR head moved during review" "$pr_url"
+if [[ "$reviewed_base_sha" != "$base_sha" || "$reviewed_head_sha" != "$head_sha" || "$current_base_sha" != "$base_sha" || "$current_head_sha" != "$head_sha" ]]; then
+  harness_update_task_status "$task_id" "pr_open" "review artifact stale; PR head or base moved during review" "$pr_url"
   if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
-    harness_issue_comment "$repo_slug" "$issue_number" "Harness note: review artifact became stale because the PR head changed during review."
+    harness_issue_comment "$repo_slug" "$issue_number" "Harness note: review artifact became stale because the PR head or base changed during review."
   fi
   printf 'review stale: %s\n' "$task_id"
   exit 0
@@ -224,22 +247,64 @@ fi
 
 case "$verdict" in
   approved)
+    harness_set_task_review_state "$task_id" "approved"
     harness_update_task_status "$task_id" "reviewed" "$summary" "$pr_url"
+    harness_record_stage_summary "$task_id" "review" "approved" "Review approved PR #$pr_number at head $head_sha." "$pr_url"
     if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
       harness_issue_comment "$repo_slug" "$issue_number" "Harness review approved for PR #$pr_number at head \`$head_sha\`."
     fi
     printf 'review approved: %s\n' "$task_id"
     ;;
+  rework)
+    rework_reason="$summary"
+    [[ -n "$rework_reason" ]] || rework_reason="review requested automatic rework for PR #$pr_number"
+    next_attempt=$((rework_attempts + 1))
+    if (( next_attempt >= rework_limit )); then
+      block_reason="automatic review rework limit reached ($next_attempt/$rework_limit): $rework_reason"
+      harness_update_task_status "$task_id" "blocked" "$block_reason" "$pr_url"
+      harness_set_task_review_state "$task_id" "blocked" "$next_attempt"
+      harness_record_stage_summary "$task_id" "review" "blocked" "Review escalated after $next_attempt automatic rework attempts for PR #$pr_number at head $head_sha." "$pr_url" "$block_reason"
+      harness_control_room_notify "blocked" "review" "$task_id" "$issue_number" "$repo_slug" "$block_reason"
+      if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+        harness_issue_blocked "$repo_slug" "$issue_number" "$block_reason"
+      fi
+      printf 'review blocked after rework limit: %s\n' "$task_id"
+      exit 2
+    fi
+    harness_update_task_status "$task_id" "rework" "$rework_reason" "$pr_url"
+    harness_set_task_review_state "$task_id" "rework" "$next_attempt"
+    harness_record_stage_summary "$task_id" "review" "rework" "Review requested automatic rework attempt $next_attempt of $rework_limit for PR #$pr_number at head $head_sha." "$pr_url"
+    printf 'review rework: %s (%s/%s)\n' "$task_id" "$next_attempt" "$rework_limit"
+    ;;
   rejected)
-    harness_update_task_status "$task_id" "review_failed" "$summary" "$pr_url"
+    harness_update_task_status "$task_id" "rejected" "$summary" "$pr_url"
+    harness_set_task_review_state "$task_id" "rejected"
+    reject_reason="$summary"
+    [[ -n "$reject_reason" ]] || reject_reason="review rejected for PR #$pr_number"
+    harness_record_stage_summary "$task_id" "review" "rejected" "Review rejected PR #$pr_number at head $head_sha." "$pr_url" "$reject_reason"
+    harness_control_room_notify "rejected" "review" "$task_id" "$issue_number" "$repo_slug" "$reject_reason"
     if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
-      harness_issue_blocked "$repo_slug" "$issue_number" "review rejected for PR #$pr_number"
+      harness_issue_rejected "$repo_slug" "$issue_number" "$reject_reason"
     fi
     printf 'review rejected: %s\n' "$task_id"
+    ;;
+  blocked|escalate)
+    block_reason="$summary"
+    [[ -n "$block_reason" ]] || block_reason="review blocked for PR #$pr_number"
+    harness_update_task_status "$task_id" "blocked" "$block_reason" "$pr_url"
+    harness_set_task_review_state "$task_id" "blocked"
+    harness_record_stage_summary "$task_id" "review" "blocked" "Review blocked PR #$pr_number at head $head_sha." "$pr_url" "$block_reason"
+    harness_control_room_notify "blocked" "review" "$task_id" "$issue_number" "$repo_slug" "$block_reason"
+    if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+      harness_issue_blocked "$repo_slug" "$issue_number" "$block_reason"
+    fi
+    printf 'review blocked: %s\n' "$task_id"
     exit 2
     ;;
   *)
-    harness_update_task_status "$task_id" "review_failed" "invalid review verdict: $verdict" "$pr_url"
+    harness_update_task_status "$task_id" "blocked" "invalid review verdict: $verdict" "$pr_url"
+    harness_set_task_review_state "$task_id" "blocked"
+    harness_record_stage_summary "$task_id" "review" "blocked" "Review produced an invalid verdict payload." "$pr_url" "invalid review verdict: $verdict"
     harness_die "invalid review verdict for $task_id: $verdict"
     ;;
 esac

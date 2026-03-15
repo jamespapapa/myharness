@@ -1,2 +1,2 @@
 # One command per line. Commands run from the task worktree root.
-ROOT=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)") && "$ROOT"/scripts/check-harness
+./scripts/check-harness --skip-doc-coverage

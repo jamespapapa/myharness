@@ -12,6 +12,10 @@ This mode is for issue-only intake:
 
 Use this mode when you want throughput scaling by adding more workers, not by manually dispatching more tasks.
 
+Default queue gate in this seed:
+
+- workers only consume issues labeled `Ready` unless you override the label filter explicitly.
+
 ## Validated Scope
 
 As of 2026-03-13, this repo has live-validated:
@@ -33,6 +37,8 @@ Validation reference:
 Implemented now:
 
 - issue selection
+- repo-level control-room tick for `land -> prepare -> review -> executor`
+- active executor limit with reconcile-before-claim dispatch
 - claim + worktree materialization
 - Codex executor launch
 - one-line result logging
@@ -50,6 +56,7 @@ Planned next:
 ## Required Files
 
 - [project.env](/Users/jules/Desktop/work/myharness/.harness/project.env)
+- [task-control-room-once](/Users/jules/Desktop/work/myharness/scripts/task-control-room-once)
 - [task-run-once](/Users/jules/Desktop/work/myharness/scripts/task-run-once)
 - [HARNESS_ADMIN.md](/Users/jules/Desktop/work/myharness/ops/HARNESS_ADMIN.md)
 - [autonomous plan](/Users/jules/Desktop/work/myharness/.omx/plans/autonomous-issue-swarm.md)
@@ -59,11 +66,14 @@ Planned next:
 Each worker tick must do exactly one of:
 
 1. `idle`
-2. `success`
-3. `blocked`
-4. `error`
+2. `waiting`
+3. `success`
+4. `blocked`
+5. `error`
 
-It must leave a JSONL line in `.harness/logs/task-run-once.jsonl` and then stop.
+It must leave a JSONL line in `.harness/logs/task-control-room-once.jsonl` or the lane-specific log and then stop.
+`idle` means the Ready queue is empty and there is no unresolved active work in land/prepare/review/executor lanes.
+`waiting` means the Ready queue is empty but active work is still running/reconciling, or a higher-priority lane still needs another wake before new claims.
 
 Operator-facing idle stdout is canonical across the control-room flow:
 
@@ -73,48 +83,52 @@ Lane-specific idle reasons stay in the JSONL `detail` field for parsing and debu
 
 ## Local Cron Example
 
-One worker every 5 minutes:
+One repo-level worker every 5 minutes:
 
 ```bash
-*/5 * * * * cd /Users/jules/Desktop/work/myharness && ./scripts/task-run-once >> /Users/jules/Desktop/work/myharness/.harness/logs/worker-1.stdout.log 2>&1
+*/5 * * * * cd /Users/jules/Desktop/work/myharness && ./scripts/task-control-room-once >> /Users/jules/Desktop/work/myharness/.harness/logs/control-room.stdout.log 2>&1
 ```
 
-Three workers:
+Three repo channels using the same control-room tick:
 
 ```bash
-*/5 * * * * cd /Users/jules/Desktop/work/myharness && ./scripts/task-run-once --log-file /Users/jules/Desktop/work/myharness/.harness/logs/worker-1.jsonl >> /Users/jules/Desktop/work/myharness/.harness/logs/worker-1.stdout.log 2>&1
-*/5 * * * * cd /Users/jules/Desktop/work/myharness && ./scripts/task-run-once --log-file /Users/jules/Desktop/work/myharness/.harness/logs/worker-2.jsonl >> /Users/jules/Desktop/work/myharness/.harness/logs/worker-2.stdout.log 2>&1
-*/5 * * * * cd /Users/jules/Desktop/work/myharness && ./scripts/task-run-once --log-file /Users/jules/Desktop/work/myharness/.harness/logs/worker-3.jsonl >> /Users/jules/Desktop/work/myharness/.harness/logs/worker-3.stdout.log 2>&1
+*/5 * * * * cd /Users/jules/Desktop/work/myharness && ./scripts/task-control-room-once --log-file /Users/jules/Desktop/work/myharness/.harness/logs/control-room-1.jsonl >> /Users/jules/Desktop/work/myharness/.harness/logs/control-room-1.stdout.log 2>&1
+*/5 * * * * cd /Users/jules/Desktop/work/myharness && ./scripts/task-control-room-once --log-file /Users/jules/Desktop/work/myharness/.harness/logs/control-room-2.jsonl >> /Users/jules/Desktop/work/myharness/.harness/logs/control-room-2.stdout.log 2>&1
+*/5 * * * * cd /Users/jules/Desktop/work/myharness && ./scripts/task-control-room-once --log-file /Users/jules/Desktop/work/myharness/.harness/logs/control-room-3.jsonl >> /Users/jules/Desktop/work/myharness/.harness/logs/control-room-3.stdout.log 2>&1
 ```
 
 The claim lock and GitHub state sync prevent the same issue from being taken twice.
+The safe default is `HARNESS_EXECUTOR_ACTIVE_LIMIT="1"`, so one-shot executor dispatch stays serialized unless the operator raises that limit intentionally.
 
-## Four-Lane Cron Shape
+## Control-Room Wake Order
 
-For full automation, run separate one-shot jobs per lane:
+The repo-level control-room tick checks lanes in this order and stops on the first non-idle result:
 
 ```bash
-*/5 * * * * cd /Users/jules/Desktop/work/myharness && ./scripts/task-run-once >> /Users/jules/Desktop/work/myharness/.harness/logs/executor.stdout.log 2>&1
-*/5 * * * * cd /Users/jules/Desktop/work/myharness && ./scripts/task-review-once >> /Users/jules/Desktop/work/myharness/.harness/logs/review.stdout.log 2>&1
-*/5 * * * * cd /Users/jules/Desktop/work/myharness && ./scripts/task-prepare-once >> /Users/jules/Desktop/work/myharness/.harness/logs/prepare.stdout.log 2>&1
-*/5 * * * * cd /Users/jules/Desktop/work/myharness && ./scripts/task-land-once >> /Users/jules/Desktop/work/myharness/.harness/logs/land.stdout.log 2>&1
+land -> prepare -> review -> executor
 ```
 
-That gives you:
+That means one wake loop will:
 
-- `task-run-once`: issue -> PR
-- `task-review-once`: PR -> review artifact
-- `task-prepare-once`: reviewed PR -> prepare artifact
-- `task-land-once`: prepared PR -> merge or wait
+- merge already-prepared work first,
+- then run prepare for reviewed PRs,
+- then run review for open PRs,
+- then reconcile executor work and only claim new `Ready` issues if the repo is otherwise quiet.
+
+The manual lane scripts remain available if you want to debug or scale a specific stage:
+
+```bash
+scripts/task-run-once
+scripts/task-review-once
+scripts/task-prepare-once
+scripts/task-land-once
+```
 
 Recommended production topology:
 
-- scale `task-run-once` horizontally
-- keep one `task-review-once`
-- keep one `task-prepare-once`
-- keep one `task-land-once`
-
-Increase review/prepare/land workers only if those lanes become the actual bottleneck.
+- start with one repo channel running `scripts/task-control-room-once`
+- add more identical control-room wakes only if you intentionally want more repo-level concurrency
+- keep `HARNESS_EXECUTOR_ACTIVE_LIMIT="1"` unless you explicitly want multiple active executor tasks
 
 ## OpenClaw Cron Shape
 
@@ -127,7 +141,7 @@ openclaw cron add \
   --name "harness-worker-1" \
   --every "5m" \
   --session isolated \
-  --message "In /Users/jules/Desktop/work/myharness, run ./scripts/task-run-once once, log the result, and exit." \
+  --message "In /Users/jules/Desktop/work/myharness, run ./scripts/task-control-room-once once, log the result, and exit." \
   --no-deliver
 ```
 
@@ -137,9 +151,12 @@ If you need more throughput, add more identical jobs with different names.
 
 1. Write a good GitHub issue using the harness intake format.
 2. Do not manually dispatch it.
-3. Wait for a worker tick to claim it.
-4. If the task blocks, inspect the GitHub comment and the JSONL log.
-5. If backlog exceeds worker throughput, add more worker cron jobs.
+3. Add the `Ready` label when the issue is actually eligible for autonomous pickup.
+4. Wait for a control-room tick to advance the repo.
+5. If stdout or JSONL says `waiting`, inspect whether active work is still running/reconciling or a higher-priority lane still needs another wake.
+6. If stdout or JSONL says `idle`, the `Ready` queue and all active lanes are empty.
+7. If the task blocks, inspect the GitHub comment and the JSONL log.
+8. If backlog exceeds worker throughput, add more worker cron jobs, then raise `HARNESS_EXECUTOR_ACTIVE_LIMIT` only if you intentionally want more than one active executor task.
 
 ## Intake Contract
 
@@ -158,12 +175,13 @@ If you want the strongest path today, use `scripts/task-intake` instead of freeh
 
 - Keep issues small.
 - Do not mix multiple unrelated asks in one issue.
-- Use labels if you want workers filtered to a subset, then pass the label to `task-run-once --label ...`.
+- The default autonomous queue is `Ready`; add that label when an issue is actually eligible for automatic pickup.
+- Use `task-control-room-once --log-file ...`, `task-run-once --label ...`, or `task-next --label ...` if you want to override the default queue gate for a specific run.
 - Treat blocked tasks as operator work, not as invisible retries.
 
 ## Current Limitation
 
-The four-lane pipeline has now been exercised against a live end-to-end PR in this repo:
+The repo-level control-room path now wraps the validated four-lane pipeline that has been exercised against a live end-to-end PR in this repo:
 
 - issue: `jamespapapa/myharness#1`
 - pr: `https://github.com/jamespapapa/myharness/pull/2`
@@ -171,6 +189,7 @@ The four-lane pipeline has now been exercised against a live end-to-end PR in th
 
 Treat the current state as:
 
+- control-room lane ordering: covered by scripted checks
 - executor lane: live-validated
 - review/prepare/land lanes: live-validated for a docs-only issue
 
@@ -185,6 +204,7 @@ For a real codebase, safe unattended merge still depends on:
 One-shot lanes are now bounded by default so cron workers do not hang indefinitely:
 
 - `HARNESS_EXECUTOR_TIMEOUT_SECONDS`
+- `HARNESS_EXECUTOR_ACTIVE_LIMIT`
 - `HARNESS_REVIEW_TIMEOUT_SECONDS`
 - `HARNESS_PREPARE_TIMEOUT_SECONDS`
 - `HARNESS_LAND_TIMEOUT_SECONDS`

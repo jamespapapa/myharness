@@ -16,6 +16,7 @@ The operator should scale throughput by adding more cron workers, not by manuall
 
 Completed in this seed repo:
 
+- `scripts/task-control-room-once`
 - `scripts/task-run-once`
 - `scripts/task-review`
 - `scripts/task-prepare`
@@ -54,7 +55,8 @@ Still open before broad production rollout:
 ### Role 2: OpenClaw cron manager
 
 - Wakes on a fixed schedule.
-- Runs exactly one `task-run-once` cycle.
+- Runs exactly one `task-control-room-once` cycle.
+- Advances active review/prepare/land/executor work before claiming more.
 - Claims no more than one issue per wake.
 - Leaves a structured log and exits.
 
@@ -107,23 +109,32 @@ Every cron worker tick should do exactly one of these outcomes:
 
 1. `idle`
    - no eligible issue
+   - no unresolved active executor work
    - write one log line
    - exit 0
-2. `success`
+2. `waiting`
+   - active review/prepare/land/executor work still needs another wake
+   - or the active executor limit is already reached when executor is reached
+   - do not claim more work
+   - write one log line
+   - exit 0
+3. `success`
    - claimed one issue
-   - executor left terminal state such as `pr_open` or `done`
+   - or reconciled one active issue to `pr_open`, `done`, or another explicit next state
    - write one result line
    - exit 0
-3. `blocked`
+4. `blocked`
    - claimed issue but task blocked
    - record blocker to GitHub and log
    - exit non-zero
-4. `error`
+5. `error`
    - failed to claim, materialize, or record a terminal state
    - mark blocked or escalate
    - exit non-zero
 
 Each worker must be disposable. No long-lived in-memory state is trusted.
+Before a worker claims new Ready work, it must reconcile stale `in_progress` executor work first.
+The safe default is an active executor limit of `1`, so the control-room path stays serialized unless the operator raises that limit explicitly.
 
 ## Cron Topology
 
@@ -132,7 +143,7 @@ Base topology:
 - N identical OpenClaw cron jobs
 - same repo
 - same issue selection rules
-- same `task-run-once` entrypoint
+- same `task-control-room-once` entrypoint
 - claim file + GitHub labels prevent double processing
 
 Scaling rule:
@@ -144,14 +155,16 @@ Scaling rule:
 
 The autonomous merge path should look like:
 
-1. Executor opens PR and marks task `pr_open`.
-2. Review worker picks one PR-open task and writes `artifacts/reviews/<task-id>/review.md|json`.
-3. Prepare worker runs scoped gates and writes `artifacts/prep/<task-id>/prep.md|gates.json`.
-4. Land worker verifies:
+1. Control-room wake tries land first for any `prepared` task.
+2. Otherwise it runs prepare for the next `reviewed` task.
+3. Otherwise it runs review for the next `pr_open` task.
+4. Otherwise executor reconciles stale `in_progress` work and only then claims one `Ready` issue.
+5. Land verifies:
    - reviewed SHA == prepared SHA == current PR head
+   - reviewed base SHA == prepared base SHA == current PR base
    - required checks green
    - merge policy satisfied
-5. Land worker merges to `main`, posts result, and marks the task `done`.
+6. Merge posts result and marks the task `done`.
 
 ## Hard Constraints
 
@@ -165,6 +178,7 @@ The autonomous merge path should look like:
 
 This repo should implement first:
 
+- `scripts/task-control-room-once`
 - `scripts/task-run-once`
 - log file output under `.harness/logs/`
 - cron-swarm operator manual

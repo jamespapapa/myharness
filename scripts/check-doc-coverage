@@ -1,0 +1,380 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=./harness-lib.sh
+source "$SCRIPT_DIR/harness-lib.sh"
+ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
+RULES_FILE="$ROOT/.harness/doc-coverage.rules.json"
+
+base_sha=""
+head_sha=""
+self_test=0
+
+usage() {
+  cat <<'EOF'
+usage: scripts/check-doc-coverage [--base-sha <sha> --head-sha <sha>] [--self-test]
+EOF
+}
+
+match_any() {
+  local value="$1"
+  shift || true
+
+  local pattern
+  for pattern in "$@"; do
+    if [[ "$value" =~ $pattern ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+join_by() {
+  local delimiter="$1"
+  shift || true
+  local joined=""
+  local value
+
+  for value in "$@"; do
+    if [[ -n "$joined" ]]; then
+      joined+="$delimiter"
+    fi
+    joined+="$value"
+  done
+
+  printf '%s' "$joined"
+}
+
+array_has_values() {
+  local value
+
+  for value in "$@"; do
+    if [[ -n "$value" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+read_lines_into_array() {
+  local var_name="$1"
+  local line escaped
+
+  eval "$var_name=()"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    printf -v escaped '%q' "$line"
+    eval "$var_name+=( $escaped )"
+  done
+}
+
+emit_added_paths_from_name_status() {
+  local status first second
+
+  while IFS=$'\t' read -r status first second; do
+    [[ -n "$status" ]] || continue
+    case "$status" in
+      A*)
+        printf '%s\n' "$first"
+        ;;
+      R*|C*)
+        printf '%s\n' "$second"
+        ;;
+    esac
+  done
+}
+
+doc_coverage_base_ref() {
+  local base_branch
+  harness_load_project_env
+  base_branch="$HARNESS_BASE_BRANCH"
+
+  if git -C "$ROOT" show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
+    printf 'origin/%s\n' "$base_branch"
+    return 0
+  fi
+
+  if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$base_branch"; then
+    printf '%s\n' "$base_branch"
+    return 0
+  fi
+
+  harness_die "doc coverage base branch not found: $base_branch"
+}
+
+collect_changed_paths() {
+  local merge_base base_ref
+
+  if [[ -n "$base_sha" || -n "$head_sha" ]]; then
+    [[ -n "$base_sha" && -n "$head_sha" ]] || harness_die "both --base-sha and --head-sha are required together"
+    git -C "$ROOT" diff --name-only "$base_sha...$head_sha"
+    return 0
+  fi
+
+  base_ref=$(doc_coverage_base_ref)
+  merge_base=$(git -C "$ROOT" merge-base HEAD "$base_ref")
+
+  {
+    git -C "$ROOT" diff --name-only "$merge_base...HEAD"
+    git -C "$ROOT" diff --name-only --cached
+    git -C "$ROOT" diff --name-only
+    git -C "$ROOT" ls-files --others --exclude-standard
+  } | sed '/^$/d' | sort -u
+}
+
+collect_introduced_paths() {
+  local merge_base base_ref
+
+  if [[ -n "$base_sha" || -n "$head_sha" ]]; then
+    [[ -n "$base_sha" && -n "$head_sha" ]] || harness_die "both --base-sha and --head-sha are required together"
+    git -C "$ROOT" diff --name-status "$base_sha...$head_sha" | emit_added_paths_from_name_status
+    return 0
+  fi
+
+  base_ref=$(doc_coverage_base_ref)
+  merge_base=$(git -C "$ROOT" merge-base HEAD "$base_ref")
+
+  {
+    git -C "$ROOT" diff --name-status "$merge_base...HEAD" | emit_added_paths_from_name_status
+    git -C "$ROOT" diff --cached --name-status | emit_added_paths_from_name_status
+    git -C "$ROOT" diff --name-status | emit_added_paths_from_name_status
+    git -C "$ROOT" ls-files --others --exclude-standard
+  } | sed '/^$/d' | sort -u
+}
+
+run_gate() {
+  [[ -f "$RULES_FILE" ]] || harness_die "doc coverage rules file not found: $RULES_FILE"
+
+  local -a changed_paths introduced_paths critical_doc_patterns rule_jsons failures
+  local -a change_patterns doc_patterns doc_targets matching_paths introduced_critical_docs missing_agents_map
+  changed_paths=()
+  introduced_paths=()
+  critical_doc_patterns=()
+  rule_jsons=()
+  failures=()
+  change_patterns=()
+  doc_patterns=()
+  doc_targets=()
+  matching_paths=()
+  introduced_critical_docs=()
+  missing_agents_map=()
+  read_lines_into_array changed_paths < <(collect_changed_paths)
+  changed_paths=("${changed_paths[@]-}")
+  if ! array_has_values "${changed_paths[@]}"; then
+    printf 'check-doc-coverage passed (no changed paths)\n'
+    return 0
+  fi
+
+  read_lines_into_array introduced_paths < <(collect_introduced_paths)
+  introduced_paths=("${introduced_paths[@]-}")
+  read_lines_into_array critical_doc_patterns < <(jq -r '.critical_doc_patterns[]' "$RULES_FILE")
+  read_lines_into_array rule_jsons < <(jq -c '.rules[]' "$RULES_FILE")
+
+  local agents_doc_map
+  agents_doc_map=$(jq -r '.agents_doc_map' "$RULES_FILE")
+
+  local rule_json rule_id description docs_updated
+  local path
+
+  for rule_json in "${rule_jsons[@]}"; do
+    rule_id=$(jq -r '.id' <<<"$rule_json")
+    description=$(jq -r '.description' <<<"$rule_json")
+    read_lines_into_array change_patterns < <(jq -r '.change_patterns[]' <<<"$rule_json")
+    read_lines_into_array doc_patterns < <(jq -r '.doc_patterns[]' <<<"$rule_json")
+    read_lines_into_array doc_targets < <(jq -r '.doc_targets[]' <<<"$rule_json")
+
+    matching_paths=()
+    for path in "${changed_paths[@]}"; do
+      [[ -n "$path" ]] || continue
+      if match_any "$path" "${change_patterns[@]}"; then
+        matching_paths+=("$path")
+      fi
+    done
+
+    [[ "${#matching_paths[@]}" -gt 0 ]] || continue
+
+    docs_updated=false
+    for path in "${changed_paths[@]}"; do
+      [[ -n "$path" ]] || continue
+      if match_any "$path" "${doc_patterns[@]}"; then
+        docs_updated=true
+        break
+      fi
+    done
+
+    if [[ "$docs_updated" == "false" ]]; then
+      failures+=("[$rule_id] $description Changed: $(join_by ', ' "${matching_paths[@]}"). Update one of: $(join_by ', ' "${doc_targets[@]}").")
+    fi
+  done
+
+  for path in "${introduced_paths[@]}"; do
+    [[ -n "$path" ]] || continue
+    if match_any "$path" "${critical_doc_patterns[@]}"; then
+      introduced_critical_docs+=("$path")
+    fi
+  done
+
+  if [[ "${#introduced_critical_docs[@]}" -gt 0 ]]; then
+    [[ -f "$ROOT/$agents_doc_map" ]] || harness_die "AGENTS doc map file not found: $agents_doc_map"
+
+    local agents_map_changed=false
+    for path in "${changed_paths[@]}"; do
+      [[ -n "$path" ]] || continue
+      if [[ "$path" == "$agents_doc_map" ]]; then
+        agents_map_changed=true
+        break
+      fi
+    done
+
+    if [[ "$agents_map_changed" == "false" ]]; then
+      failures+=("[agents-doc-map] New critical docs require an $agents_doc_map update in the same change.")
+    fi
+
+    for path in "${introduced_critical_docs[@]}"; do
+      if ! grep -Fq "$path" "$ROOT/$agents_doc_map"; then
+        missing_agents_map+=("$path")
+      fi
+    done
+
+    if [[ "${#missing_agents_map[@]}" -gt 0 ]]; then
+      failures+=("[agents-doc-map] New critical docs must be mapped from $agents_doc_map. Missing references: $(join_by ', ' "${missing_agents_map[@]}").")
+    fi
+  fi
+
+  if [[ "${#failures[@]}" -gt 0 ]]; then
+    printf 'check-doc-coverage failed\n'
+    printf '%s\n' "${failures[@]}"
+    return 1
+  fi
+
+  printf 'check-doc-coverage passed\n'
+}
+
+assert_ok() {
+  local worktree="$1"
+  local description="$2"
+  shift 2
+  local output
+
+  if ! output=$(cd "$worktree" && "$@" 2>&1); then
+    printf 'assert_ok failed: %s\noutput: %s\n' "$description" "$output" >&2
+    exit 1
+  fi
+}
+
+assert_fails_contains() {
+  local worktree="$1"
+  local needle="$2"
+  local description="$3"
+  shift 3
+  local output
+
+  if output=$(cd "$worktree" && "$@" 2>&1); then
+    printf 'assert_fails_contains failed: %s\noutput: %s\n' "$description" "$output" >&2
+    exit 1
+  fi
+
+  if [[ "$output" != *"$needle"* ]]; then
+    printf 'assert_fails_contains failed: %s\nneedle: %s\noutput: %s\n' "$description" "$needle" "$output" >&2
+    exit 1
+  fi
+}
+
+setup_self_test_repo() {
+  local name="$1"
+  local repo_dir="$TMP_DIR/$name/repo"
+
+  mkdir -p "$repo_dir"
+  cp -R "$ROOT/scripts" "$ROOT/.harness" "$ROOT/ops" "$repo_dir/"
+  cp "$ROOT/AGENTS.md" "$ROOT/README.md" "$repo_dir/" 2>/dev/null || true
+
+  git -C "$repo_dir" init -q -b main
+  git -C "$repo_dir" config user.name "Harness Test"
+  git -C "$repo_dir" config user.email "harness-test@example.com"
+  git -C "$repo_dir" add .
+  git -C "$repo_dir" commit -qm "fixture"
+  git -C "$repo_dir" branch dev main
+  git -C "$repo_dir" checkout -q -b fix/doc-coverage dev
+
+  printf '%s\n' "$repo_dir"
+}
+
+run_self_test() {
+  TMP_DIR=$(mktemp -d)
+  trap 'rm -rf "$TMP_DIR"' EXIT
+
+  local repo_dir base head
+
+  repo_dir=$(setup_self_test_repo "non-sensitive-change")
+  printf 'scratch note\n' >"$repo_dir/notes.txt"
+  assert_ok "$repo_dir" "non-sensitive changes should not require docs" bash ./scripts/check-doc-coverage
+
+  repo_dir=$(setup_self_test_repo "architecture-missing-doc")
+  printf '\n# architecture tweak\n' >>"$repo_dir/scripts/task-start"
+  assert_fails_contains "$repo_dir" "[architecture]" "architecture changes without doc updates should fail" bash ./scripts/check-doc-coverage
+
+  repo_dir=$(setup_self_test_repo "architecture-with-doc")
+  printf '\n# architecture tweak\n' >>"$repo_dir/scripts/task-start"
+  printf '\n- Doc coverage gate: architecture-sensitive flow changes must update mapped docs.\n' >>"$repo_dir/ops/HARNESS_ADMIN.md"
+  assert_ok "$repo_dir" "architecture changes with doc updates should pass" bash ./scripts/check-doc-coverage
+
+  repo_dir=$(setup_self_test_repo "new-critical-doc-missing-agents")
+  printf '# New Runbook\n' >"$repo_dir/ops/TESTING.md"
+  assert_fails_contains "$repo_dir" "[agents-doc-map]" "new critical docs should require AGENTS mappings" bash ./scripts/check-doc-coverage
+
+  repo_dir=$(setup_self_test_repo "new-critical-doc-with-agents")
+  printf '# New Runbook\n' >"$repo_dir/ops/TESTING.md"
+  printf '\n- Testing runbook: [ops/TESTING.md](ops/TESTING.md)\n' >>"$repo_dir/AGENTS.md"
+  assert_ok "$repo_dir" "new critical docs should pass once AGENTS maps them" bash ./scripts/check-doc-coverage
+
+  repo_dir=$(setup_self_test_repo "range-mode")
+  base=$(git -C "$repo_dir" rev-parse HEAD)
+  printf '\n# prepare contract tweak\n' >>"$repo_dir/scripts/task-prepare"
+  printf '\n- Prepare now runs doc coverage before the docs-only short-circuit.\n' >>"$repo_dir/ops/HARNESS_ADMIN.md"
+  git -C "$repo_dir" add scripts/task-prepare ops/HARNESS_ADMIN.md
+  git -C "$repo_dir" commit -qm "range change"
+  head=$(git -C "$repo_dir" rev-parse HEAD)
+  assert_ok "$repo_dir" "range mode should honor the same rules as local mode" bash ./scripts/check-doc-coverage --base-sha "$base" --head-sha "$head"
+
+  repo_dir=$(setup_self_test_repo "explicit-base-override")
+  git -C "$repo_dir" checkout -q main
+  git -C "$repo_dir" checkout -q -b hotfix/docs-base main
+  printf 'scratch note\n' >"$repo_dir/notes.txt"
+  assert_ok "$repo_dir" "local mode should honor HARNESS_BASE_BRANCH overrides instead of forcing the integration branch" env HARNESS_BASE_BRANCH=main bash ./scripts/check-doc-coverage
+
+  printf 'check-doc-coverage self-test passed\n'
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --base-sha)
+      base_sha="${2:-}"
+      shift 2
+      ;;
+    --head-sha)
+      head_sha="${2:-}"
+      shift 2
+      ;;
+    --self-test)
+      self_test=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      harness_die "unknown argument: $1"
+      ;;
+  esac
+done
+
+if [[ "$self_test" -eq 1 ]]; then
+  run_self_test
+  exit 0
+fi
+
+run_gate

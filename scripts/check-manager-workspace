@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+SANDBOX="$TMP/repo"
+
+mkdir -p "$SANDBOX"
+cp -R "$ROOT/scripts" "$ROOT/.harness" "$ROOT/ops" "$SANDBOX/"
+cp "$ROOT/README.md" "$ROOT/AGENTS.md" "$SANDBOX/" 2>/dev/null || true
+
+git -C "$SANDBOX" init -q
+jq '.project.topology.runners.entries[0].manager_dir = ".tmp/manager/deep/openclaw"' \
+  "$SANDBOX/.harness/project.yaml" > "$SANDBOX/.harness/project.yaml.tmp"
+mv "$SANDBOX/.harness/project.yaml.tmp" "$SANDBOX/.harness/project.yaml"
+
+bash "$SANDBOX/scripts/openclaw-manager-setup" >/dev/null
+MANAGER_DIR="$SANDBOX/.tmp/manager/deep/openclaw"
+START="$MANAGER_DIR/START.md"
+AGENTS="$MANAGER_DIR/AGENTS.md"
+EXPECTED_SCRIPTS_REL='../../../../scripts'
+EXPECTED_OPS_REL='../../../../ops'
+EXPECTED_HARNESS_REL='../../../../.harness'
+
+[[ -f "$START" ]] || { printf 'missing START.md at %s\n' "$START" >&2; exit 1; }
+[[ -f "$AGENTS" ]] || { printf 'missing AGENTS.md at %s\n' "$AGENTS" >&2; exit 1; }
+
+grep -q "${EXPECTED_SCRIPTS_REL}/task-control-room-once" "$START" || { printf 'START.md missing rendered task-control-room-once path\n' >&2; exit 1; }
+grep -q "${EXPECTED_SCRIPTS_REL}/task-sync-request --source-ref " "$START" || { printf 'START.md missing rendered task-sync-request path\n' >&2; exit 1; }
+grep -q "${EXPECTED_OPS_REL}/HARNESS_ADMIN.md" "$START" || { printf 'START.md missing rendered HARNESS_ADMIN path\n' >&2; exit 1; }
+grep -q "${EXPECTED_HARNESS_REL}/project.yaml" "$START" || { printf 'START.md missing rendered project.yaml path\n' >&2; exit 1; }
+grep -q "${EXPECTED_SCRIPTS_REL}/task-start --issue <n>" "$AGENTS" || { printf 'AGENTS.md missing rendered task-start path\n' >&2; exit 1; }
+grep -q "${EXPECTED_SCRIPTS_REL}/task-sync-request --source-ref " "$AGENTS" || { printf 'AGENTS.md missing rendered task-sync-request path\n' >&2; exit 1; }
+grep -q "${EXPECTED_OPS_REL}/HARNESS_ADMIN.md" "$AGENTS" || { printf 'AGENTS.md missing rendered admin path\n' >&2; exit 1; }
+grep -q "${EXPECTED_HARNESS_REL}/project.yaml" "$AGENTS" || { printf 'AGENTS.md missing rendered project manifest path\n' >&2; exit 1; }
+
+printf 'check-manager-workspace passed\n'
