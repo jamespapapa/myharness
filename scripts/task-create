@@ -82,7 +82,7 @@ if [[ -n "$jira_issue_key" ]]; then
 fi
 
 if [[ -z "$base_branch" ]]; then
-  base_branch="$HARNESS_BASE_BRANCH"
+  base_branch="$HARNESS_INTEGRATION_BRANCH"
 fi
 
 harness_ensure_base_branch "$base_branch"
