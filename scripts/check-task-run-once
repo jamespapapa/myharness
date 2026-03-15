@@ -500,7 +500,7 @@ EOF
 }
 
 scenario_dispatch_only_records_assignment() {
-  local output claim_status assignment_slot assignment_channel worker_log claim_summary
+  local output claim_status assignment_slot assignment_channel assigned_by worker_log claim_summary
 
   setup_fixture "dispatch-only"
   write_mock_issue 9010 "Dispatch only issue" '[{"name":"Ready"}]'
@@ -517,6 +517,9 @@ scenario_dispatch_only_records_assignment() {
 
   assignment_channel=$(jq -r '.assignment.channel // ""' "$REPO_DIR/.harness/tasks/issue-9010/task.json")
   assert_eq "$assignment_channel" "exec-a" "task record should store the assigned channel"
+
+  assigned_by=$(jq -r '.assignment.assigned_by // ""' "$REPO_DIR/.harness/tasks/issue-9010/task.json")
+  assert_eq "$assigned_by" "task-run-once" "direct dispatch should record task-run-once as the assignment owner"
 
   worker_log=$(jq -r '."example/test-harness#9010".worker_log // ""' "$REPO_DIR/.harness/state/claims.json")
   assert_eq "$worker_log" "" "dispatch-only should not launch the worker"

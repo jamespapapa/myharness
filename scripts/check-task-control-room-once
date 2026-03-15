@@ -160,7 +160,7 @@ scenario_dispatch_flags_flow_to_executor_lane() {
   assert_eq "$output" "success: dispatched issue #33 -> exec-a/slot-a" "control room should be able to dispatch without launching local execution"
 
   calls=$(cat "$REPO_DIR/CALLS.log")
-  assert_eq "$calls" $'task-land-once\ntask-prepare-once\ntask-review-once\ntask-run-once --dispatch-only --assign-slot slot-a --assign-channel exec-a' "control room should pass dispatch assignment flags through to the executor lane"
+  assert_eq "$calls" $'task-land-once\ntask-prepare-once\ntask-review-once\ntask-run-once --dispatch-only --assign-slot slot-a --assign-channel exec-a --assigned-by task-control-room-once' "control room should pass dispatch assignment provenance through to the executor lane"
 }
 
 scenario_stops_on_land_lane

@@ -13,6 +13,7 @@ assigned_only=0
 dispatch_only=0
 assignment_slot=""
 assignment_channel=""
+assigned_by="task-run-once"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -44,9 +45,13 @@ while [[ $# -gt 0 ]]; do
       assignment_channel="${2:-}"
       shift 2
       ;;
+    --assigned-by)
+      assigned_by="${2:-}"
+      shift 2
+      ;;
     -h|--help)
       cat <<'EOF'
-usage: scripts/task-run-once [--label <label>] [--log-file <path>] [--dry-run] [--assigned-only | --dispatch-only] [--assign-slot <slot>] [--assign-channel <channel>]
+usage: scripts/task-run-once [--label <label>] [--log-file <path>] [--dry-run] [--assigned-only | --dispatch-only] [--assign-slot <slot>] [--assign-channel <channel>] [--assigned-by <name>]
 EOF
       exit 0
       ;;
@@ -653,7 +658,7 @@ if [[ "$dry_run" -eq 1 ]]; then
   exit 0
 fi
 
-if ! start_output=$("$SCRIPT_DIR/task-start" --issue "$issue_number" --assign-slot "$assignment_slot" --assign-channel "$assignment_channel" --assigned-by "task-run-once" --enforce-active-limit 2>&1); then
+if ! start_output=$("$SCRIPT_DIR/task-start" --issue "$issue_number" --assign-slot "$assignment_slot" --assign-channel "$assignment_channel" --assigned-by "$assigned_by" --enforce-active-limit 2>&1); then
   if [[ "$start_output" == *"active executor limit reached:"* ]]; then
     waiting_detail="active limit reached during claim for issue #$issue_number; $active_summary_text"
     emit_log "waiting" "active limit reached during claim" "$issue_number" "$task_id" "$waiting_detail"

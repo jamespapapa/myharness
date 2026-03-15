@@ -100,7 +100,7 @@ run_lane_once() {
     if [[ "$dispatch_only" -eq 1 ]]; then
       command_args+=(--dispatch-only)
     fi
-    command_args+=(--assign-slot "$assignment_slot" --assign-channel "$assignment_channel")
+    command_args+=(--assign-slot "$assignment_slot" --assign-channel "$assignment_channel" --assigned-by "task-control-room-once")
   fi
 
   if [[ "${#command_args[@]}" -gt 0 ]]; then
