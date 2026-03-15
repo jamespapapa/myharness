@@ -174,6 +174,8 @@ harness_load_project_env() {
   : "${HARNESS_LABEL_PR_OPEN:=harness:pr-open}"
   : "${HARNESS_LABEL_DONE:=harness:done}"
   : "${HARNESS_LABEL_BLOCKED:=harness:blocked}"
+  : "${HARNESS_LABEL_DEV_BATCH:=harness:in-dev-batch}"
+  : "${HARNESS_LABEL_RELEASED:=harness:released}"
   : "${HARNESS_CLAIM_TTL_MINUTES:=240}"
   : "${HARNESS_RUNNER_MODE:=${manifest_runner_mode:-single-runner}}"
   : "${HARNESS_WORKTREE_ROOT:=$(harness_resolve_path "$root" "${manifest_worktree_root:-$parent/$base-worktrees}")}"
@@ -238,6 +240,299 @@ harness_prepare_state() {
   mkdir -p "$HARNESS_TASK_DIR" "$HARNESS_STATE_DIR" "$HARNESS_LOG_DIR"
   if [[ ! -f "$HARNESS_CLAIMS_FILE" ]]; then
     printf '{}\n' > "$HARNESS_CLAIMS_FILE"
+  fi
+  if [[ ! -f "$(harness_release_batches_path)" ]]; then
+    cat >"$(harness_release_batches_path)" <<EOF
+{
+  "schema_version": 1,
+  "integration_branch": "$HARNESS_INTEGRATION_BRANCH",
+  "release_branch": "$HARNESS_RELEASE_BRANCH",
+  "active_batch_id": null,
+  "batches": []
+}
+EOF
+  fi
+}
+
+harness_release_batches_path() {
+  printf '%s/release-batches.json\n' "$HARNESS_STATE_DIR"
+}
+
+harness_release_batch_id() {
+  local integration release stamp
+  harness_load_project_env
+  integration=$(harness_slugify "$HARNESS_INTEGRATION_BRANCH")
+  release=$(harness_slugify "$HARNESS_RELEASE_BRANCH")
+  stamp=$(date -u +"%Y%m%dT%H%M%SZ")
+  printf '%s-to-%s-%s-%s\n' "$integration" "$release" "$stamp" "$RANDOM"
+}
+
+harness_record_issue_in_active_release_batch() {
+  local task_id issue_number pr_number pr_url merge_sha merged_at release_file active_batch_id
+  local status_file had_lock
+  task_id="$1"
+  issue_number="$2"
+  pr_number="$3"
+  pr_url="$4"
+  merge_sha="$5"
+  merged_at="${6:-$(harness_now_utc)}"
+
+  harness_load_project_env
+  harness_prepare_state
+  had_lock="${HARNESS_LOCK_HELD:-0}"
+  harness_acquire_lock
+  release_file=$(harness_release_batches_path)
+  active_batch_id=$(jq -r '.active_batch_id // ""' "$release_file")
+
+  if [[ -z "$active_batch_id" || "$active_batch_id" == "null" ]]; then
+    active_batch_id=$(harness_release_batch_id)
+    jq \
+      --arg batch_id "$active_batch_id" \
+      --arg integration_branch "$HARNESS_INTEGRATION_BRANCH" \
+      --arg release_branch "$HARNESS_RELEASE_BRANCH" \
+      --arg created_at "$merged_at" '
+        .integration_branch = $integration_branch
+        | .release_branch = $release_branch
+        | .active_batch_id = $batch_id
+        | .batches += [{
+            id: $batch_id,
+            integration_branch: $integration_branch,
+            release_branch: $release_branch,
+            status: "active",
+            created_at: $created_at,
+            window_start: $created_at,
+            window_end: $created_at,
+            released_at: null,
+            release_pr_number: null,
+            release_pr_url: null,
+            release_merge_sha: null,
+            issues: []
+          }]
+      ' "$release_file" >"$release_file.tmp"
+    mv "$release_file.tmp" "$release_file"
+  fi
+
+  jq \
+    --arg batch_id "$active_batch_id" \
+    --arg integration_branch "$HARNESS_INTEGRATION_BRANCH" \
+    --arg release_branch "$HARNESS_RELEASE_BRANCH" \
+    --arg task_id "$task_id" \
+    --arg pr_url "$pr_url" \
+    --arg merge_sha "$merge_sha" \
+    --arg merged_at "$merged_at" \
+    --argjson issue_number "$issue_number" \
+    --argjson pr_number "$pr_number" '
+      .integration_branch = $integration_branch
+      | .release_branch = $release_branch
+      | .active_batch_id = $batch_id
+      | .batches = (
+          .batches
+          | map(
+              if .id == $batch_id then
+                .integration_branch = $integration_branch
+                | .release_branch = $release_branch
+                | .status = "active"
+                | .window_start = (
+                    if ((.window_start // "") | length) == 0 or $merged_at < .window_start
+                    then $merged_at
+                    else .window_start
+                    end
+                  )
+                | .window_end = (
+                    if ((.window_end // "") | length) == 0 or $merged_at > .window_end
+                    then $merged_at
+                    else .window_end
+                    end
+                  )
+                | .issues = (
+                    (.issues // []) as $issues
+                    | if any($issues[]?; (.issue_number // null) == $issue_number) then
+                        $issues
+                        | map(
+                            if (.issue_number // null) == $issue_number then
+                              .task_id = $task_id
+                              | .pr_number = $pr_number
+                              | .pr_url = $pr_url
+                              | .merge_sha = $merge_sha
+                              | .merged_at = $merged_at
+                              | .released_at = null
+                              | .release_pr_number = null
+                              | .release_pr_url = null
+                              | .release_merge_sha = null
+                            else .
+                            end
+                          )
+                      else
+                        $issues + [{
+                          issue_number: $issue_number,
+                          task_id: $task_id,
+                          pr_number: $pr_number,
+                          pr_url: $pr_url,
+                          merge_sha: $merge_sha,
+                          merged_at: $merged_at,
+                          released_at: null,
+                          release_pr_number: null,
+                          release_pr_url: null,
+                          release_merge_sha: null
+                        }]
+                      end
+                  )
+              else .
+              end
+            )
+        )
+    ' "$release_file" >"$release_file.tmp"
+  mv "$release_file.tmp" "$release_file"
+
+  status_file=$(harness_task_status_path "$task_id")
+  if [[ -f "$status_file" ]]; then
+    jq \
+      --arg batch_id "$active_batch_id" \
+      --arg merged_at "$merged_at" \
+      --arg merge_sha "$merge_sha" '
+        .release_batch_id = $batch_id
+        | .merged_to_integration_at = $merged_at
+        | .integration_merge_sha = $merge_sha
+        | del(.released_to_main_at, .release_pr_url, .release_pr_number, .release_merge_sha)
+      ' "$status_file" >"$status_file.tmp"
+    mv "$status_file.tmp" "$status_file"
+  fi
+
+  if [[ "$had_lock" != "1" ]]; then
+    harness_release_lock
+  fi
+
+  printf '%s\n' "$active_batch_id"
+}
+
+harness_promote_active_release_batch() {
+  local task_id pr_number pr_url merge_sha released_at repo_slug
+  local release_file active_batch_id issue_numbers status_file had_lock
+  task_id="$1"
+  pr_number="$2"
+  pr_url="$3"
+  merge_sha="$4"
+  released_at="${5:-$(harness_now_utc)}"
+  repo_slug="${6:-}"
+
+  harness_load_project_env
+  harness_prepare_state
+  had_lock="${HARNESS_LOCK_HELD:-0}"
+  harness_acquire_lock
+  release_file=$(harness_release_batches_path)
+  active_batch_id=$(jq -r '.active_batch_id // ""' "$release_file")
+
+  if [[ -z "$active_batch_id" || "$active_batch_id" == "null" ]]; then
+    if [[ "$had_lock" != "1" ]]; then
+      harness_release_lock
+    fi
+    return 0
+  fi
+
+  issue_numbers=$(jq -r --arg batch_id "$active_batch_id" '
+    .batches[]
+    | select(.id == $batch_id)
+    | .issues[]?.issue_number
+  ' "$release_file")
+
+  jq \
+    --arg batch_id "$active_batch_id" \
+    --arg integration_branch "$HARNESS_INTEGRATION_BRANCH" \
+    --arg release_branch "$HARNESS_RELEASE_BRANCH" \
+    --arg released_at "$released_at" \
+    --arg pr_url "$pr_url" \
+    --arg merge_sha "$merge_sha" \
+    --argjson pr_number "$pr_number" '
+      .integration_branch = $integration_branch
+      | .release_branch = $release_branch
+      | .active_batch_id = null
+      | .batches = (
+          .batches
+          | map(
+              if .id == $batch_id then
+                .integration_branch = $integration_branch
+                | .release_branch = $release_branch
+                | .status = "released"
+                | .released_at = $released_at
+                | .release_pr_number = $pr_number
+                | .release_pr_url = $pr_url
+                | .release_merge_sha = $merge_sha
+                | .issues = [
+                    (.issues // [])[]
+                    | .released_at = $released_at
+                    | .release_pr_number = $pr_number
+                    | .release_pr_url = $pr_url
+                    | .release_merge_sha = $merge_sha
+                  ]
+              else .
+              end
+            )
+        )
+    ' "$release_file" >"$release_file.tmp"
+  mv "$release_file.tmp" "$release_file"
+
+  status_file=$(harness_task_status_path "$task_id")
+  if [[ -f "$status_file" ]]; then
+    jq \
+      --arg released_at "$released_at" \
+      --arg pr_url "$pr_url" \
+      --arg merge_sha "$merge_sha" \
+      --arg batch_id "$active_batch_id" \
+      --argjson pr_number "$pr_number" '
+        .release_batch_id = $batch_id
+        | .released_to_main_at = $released_at
+        | .release_pr_url = $pr_url
+        | .release_pr_number = $pr_number
+        | .release_merge_sha = $merge_sha
+      ' "$status_file" >"$status_file.tmp"
+    mv "$status_file.tmp" "$status_file"
+  fi
+
+  if [[ "$had_lock" != "1" ]]; then
+    harness_release_lock
+  fi
+
+  if [[ -z "$repo_slug" ]]; then
+    repo_slug=$(harness_repo_slug 2>/dev/null || true)
+  fi
+  if [[ -n "$repo_slug" ]] && harness_can_sync_github; then
+    while IFS= read -r issue_number; do
+      [[ -n "$issue_number" ]] || continue
+      harness_issue_released_to_main "$repo_slug" "$issue_number" "$active_batch_id" "$released_at" "$pr_url" "$merge_sha"
+    done <<<"$issue_numbers"
+  fi
+
+  printf '%s\n' "$active_batch_id"
+}
+
+harness_record_release_metadata_for_pr() {
+  local task_id issue_number repo_slug pr_number pr_url base_ref head_ref merge_sha merged_at batch_id
+  task_id="$1"
+  issue_number="${2:-}"
+  repo_slug="${3:-}"
+  pr_number="$4"
+  pr_url="$5"
+  base_ref="$6"
+  head_ref="${7:-}"
+  merge_sha="${8:-}"
+  merged_at="${9:-$(harness_now_utc)}"
+
+  harness_load_project_env
+
+  if [[ "$base_ref" == "$HARNESS_INTEGRATION_BRANCH" ]]; then
+    [[ -n "$issue_number" ]] || return 0
+    batch_id=$(harness_record_issue_in_active_release_batch "$task_id" "$issue_number" "$pr_number" "$pr_url" "$merge_sha" "$merged_at")
+    if [[ -z "$repo_slug" ]]; then
+      repo_slug=$(harness_repo_slug 2>/dev/null || true)
+    fi
+    if [[ -n "$repo_slug" ]] && harness_can_sync_github; then
+      harness_issue_added_to_dev_batch "$repo_slug" "$issue_number" "$batch_id" "$merged_at" "$pr_url" "$merge_sha"
+    fi
+    return 0
+  fi
+
+  if [[ "$base_ref" == "$HARNESS_RELEASE_BRANCH" && "$head_ref" == "$HARNESS_INTEGRATION_BRANCH" ]]; then
+    harness_promote_active_release_batch "$task_id" "$pr_number" "$pr_url" "$merge_sha" "$merged_at" "$repo_slug" >/dev/null
   fi
 }
 
@@ -746,7 +1041,7 @@ harness_pr_number_from_url() {
 harness_fetch_pr_json() {
   local pr_ref
   pr_ref="$1"
-  gh pr view "$pr_ref" --json number,title,url,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,statusCheckRollup,files,mergeStateStatus
+  gh pr view "$pr_ref" --json number,title,url,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,mergedAt,statusCheckRollup,files,mergeStateStatus
 }
 
 harness_task_pr_json() {
@@ -1151,6 +1446,93 @@ harness_ensure_status_labels() {
   harness_ensure_label "$repo" "$HARNESS_LABEL_PR_OPEN" "5319e7" "Harness task has an open PR"
   harness_ensure_label "$repo" "$HARNESS_LABEL_DONE" "0e8a16" "Harness task is complete"
   harness_ensure_label "$repo" "$HARNESS_LABEL_BLOCKED" "d93f0b" "Harness task is blocked and needs intervention"
+  harness_ensure_label "$repo" "$HARNESS_LABEL_DEV_BATCH" "1d76db" "Harness issue is part of the active dev release batch"
+  harness_ensure_label "$repo" "$HARNESS_LABEL_RELEASED" "0a8f3d" "Harness issue was promoted from dev to main"
+}
+
+harness_issue_added_to_dev_batch() {
+  local repo issue_number batch_id merged_at pr_url merge_sha payload
+  repo="$1"
+  issue_number="$2"
+  batch_id="$3"
+  merged_at="$4"
+  pr_url="${5:-}"
+  merge_sha="${6:-}"
+
+  harness_load_project_env
+  harness_ensure_status_labels "$repo"
+  gh issue edit "$issue_number" -R "$repo" \
+    --remove-label "$HARNESS_LABEL_RELEASED" \
+    --add-label "$HARNESS_LABEL_DEV_BATCH" >/dev/null 2>&1 || true
+
+  payload=$(jq -nc \
+    --arg event "dev_batch_joined" \
+    --arg batch_id "$batch_id" \
+    --arg integration_branch "$HARNESS_INTEGRATION_BRANCH" \
+    --arg release_branch "$HARNESS_RELEASE_BRANCH" \
+    --arg merged_at "$merged_at" \
+    --arg pr_url "$pr_url" \
+    --arg merge_sha "$merge_sha" '
+      {
+        event: $event,
+        batch_id: $batch_id,
+        integration_branch: $integration_branch,
+        release_branch: $release_branch,
+        merged_at: $merged_at,
+        pr_url: (if ($pr_url | length) > 0 then $pr_url else null end),
+        merge_sha: (if ($merge_sha | length) > 0 then $merge_sha else null end)
+      }
+    ')
+
+  harness_issue_comment "$repo" "$issue_number" \
+"Harness release tracking: added to the active dev batch.
+
+\`\`\`json
+$payload
+\`\`\`"
+}
+
+harness_issue_released_to_main() {
+  local repo issue_number batch_id released_at pr_url merge_sha payload
+  repo="$1"
+  issue_number="$2"
+  batch_id="$3"
+  released_at="$4"
+  pr_url="${5:-}"
+  merge_sha="${6:-}"
+
+  harness_load_project_env
+  harness_ensure_status_labels "$repo"
+  gh issue edit "$issue_number" -R "$repo" \
+    --remove-label "$HARNESS_LABEL_DEV_BATCH" \
+    --add-label "$HARNESS_LABEL_DONE" \
+    --add-label "$HARNESS_LABEL_RELEASED" >/dev/null 2>&1 || true
+
+  payload=$(jq -nc \
+    --arg event "released_to_main" \
+    --arg batch_id "$batch_id" \
+    --arg integration_branch "$HARNESS_INTEGRATION_BRANCH" \
+    --arg release_branch "$HARNESS_RELEASE_BRANCH" \
+    --arg released_at "$released_at" \
+    --arg pr_url "$pr_url" \
+    --arg merge_sha "$merge_sha" '
+      {
+        event: $event,
+        batch_id: $batch_id,
+        integration_branch: $integration_branch,
+        release_branch: $release_branch,
+        released_at: $released_at,
+        release_pr_url: (if ($pr_url | length) > 0 then $pr_url else null end),
+        release_merge_sha: (if ($merge_sha | length) > 0 then $merge_sha else null end)
+      }
+    ')
+
+  harness_issue_comment "$repo" "$issue_number" \
+"Harness release tracking: promoted from dev to main.
+
+\`\`\`json
+$payload
+\`\`\`"
 }
 
 harness_issue_comment() {

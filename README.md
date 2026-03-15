@@ -20,6 +20,7 @@ What this repo gives you:
 - stage-by-stage summaries stored on each local task record
 - tracked review / prepare / land artifacts under `artifacts/`
 - GitHub label and issue-state synchronization
+- active dev-batch and released-batch tracking in `.harness/state/release-batches.json`
 - optional Jira issue comment sync for linked tasks
 - optional Discord control-room updates for blocked and rejected outcomes
 - default queue gating so autonomous fetch consumes only issues labeled `Ready`
@@ -45,6 +46,12 @@ What you still need before using this on a real codebase:
 4. Set `HARNESS_JIRA_BASE_URL`, `HARNESS_JIRA_USER_EMAIL`, and `HARNESS_JIRA_API_TOKEN` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env), then include `Jira: ABC-123` or a Jira browse URL in the task body if you want linked tasks to sync concise stage comments into Jira.
 5. Add GitHub issue forms or use `scripts/task-intake` consistently, because this seed repo does not yet enforce intake quality through `.github/ISSUE_TEMPLATE/`.
 6. If you want multiple repo channels or wider fan-out, add them on top of the control-room tick intentionally; the safe default here is one repo channel plus one serialized wake loop.
+
+Release tracking:
+
+- issue PRs merged to `dev` are added automatically to the active batch in `.harness/state/release-batches.json`
+- a `dev` -> `main` promotion PR merged through `scripts/task-land` closes that batch and stamps every shipped issue with release metadata
+- the operator inspection commands live in [ops/HARNESS_ADMIN.md](/Users/jules/Desktop/work/myharness/ops/HARNESS_ADMIN.md)
 
 Quick start:
 
