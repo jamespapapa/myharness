@@ -24,6 +24,19 @@ What this repo gives you:
 - optional Discord control-room updates for blocked and rejected outcomes
 - default queue gating so autonomous fetch consumes only issues labeled `Ready`
 
+## Direction: from one harness repo to many project repos
+
+The intended long-term shape is:
+
+- one shared `harness-core`,
+- many project repos with thin project overlays,
+- one control-tower channel per project,
+- one or more execution channels per project,
+- clean runner clones for actual autonomous execution,
+- sync-only updates for shared harness-core paths.
+
+In other words: projects may contain harness-core files, but those shared paths should not drift through ad-hoc local edits. They should move through an explicit harness sync flow.
+
 What you still need before using this on a real codebase:
 
 1. Replace [.harness/prepare.commands](/Users/jules/Desktop/work/myharness/.harness/prepare.commands) with project-specific `lint`, `test`, `build`, or invariant gates.
@@ -60,4 +73,7 @@ Primary docs:
 - [AGENTS.md](/Users/jules/Desktop/work/myharness/AGENTS.md)
 - [ops/HARNESS_ADMIN.md](/Users/jules/Desktop/work/myharness/ops/HARNESS_ADMIN.md)
 - [ops/AUTONOMOUS_SWARM.md](/Users/jules/Desktop/work/myharness/ops/AUTONOMOUS_SWARM.md)
+- [ops/MULTI_PROJECT_MODEL.md](/Users/jules/Desktop/work/myharness/ops/MULTI_PROJECT_MODEL.md)
+- [ops/HARNESS_SYNC.md](/Users/jules/Desktop/work/myharness/ops/HARNESS_SYNC.md)
+- [ops/PROJECT_AGENTS_CONTRACT.md](/Users/jules/Desktop/work/myharness/ops/PROJECT_AGENTS_CONTRACT.md)
 - [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env)
