@@ -86,6 +86,9 @@ harness_load_project_env() {
   : "${HARNESS_MERGE_METHOD:=squash}"
   : "${HARNESS_REQUIRE_GREEN_CHECKS:=0}"
   : "${HARNESS_CONTROL_ROOM_DISCORD_WEBHOOK_URL:=}"
+  : "${HARNESS_JIRA_BASE_URL:=}"
+  : "${HARNESS_JIRA_USER_EMAIL:=}"
+  : "${HARNESS_JIRA_API_TOKEN:=}"
   : "${HARNESS_LABEL_ACTIVE:=harness:in-progress}"
   : "${HARNESS_LABEL_PR_OPEN:=harness:pr-open}"
   : "${HARNESS_LABEL_DONE:=harness:done}"
@@ -669,6 +672,273 @@ harness_run_prepare_commands() {
       return 1
     fi
   done <"$commands_file"
+}
+
+harness_extract_jira_issue_key_from_text() {
+  local text line key
+  text="${1:-}"
+  [[ -n "$text" ]] || return 1
+
+  line=$(printf '%s\n' "$text" | grep -im1 -E '^[[:space:]>*-]*jira([[:space:]]+issue)?[[:space:]]*:' || true)
+  if [[ -n "$line" ]]; then
+    key=$(printf '%s\n' "$line" | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | head -n 1 || true)
+    if [[ -n "$key" ]]; then
+      printf '%s\n' "$key"
+      return 0
+    fi
+  fi
+
+  key=$(printf '%s\n' "$text" \
+    | grep -oE 'https?://[^[:space:]]+/browse/[A-Z][A-Z0-9]+-[0-9]+' \
+    | sed -E 's#.*/browse/([A-Z][A-Z0-9]+-[0-9]+)$#\1#' \
+    | head -n 1 || true)
+  [[ -n "$key" ]] || return 1
+  printf '%s\n' "$key"
+}
+
+harness_jira_issue_url() {
+  local issue_key base_url
+  issue_key="${1:-}"
+
+  harness_load_project_env
+  base_url="${HARNESS_JIRA_BASE_URL%/}"
+  [[ -n "$issue_key" && -n "$base_url" ]] || return 1
+  printf '%s/browse/%s\n' "$base_url" "$issue_key"
+}
+
+harness_can_sync_jira() {
+  harness_load_project_env
+  command -v curl >/dev/null 2>&1 || return 1
+  [[ -n "${HARNESS_JIRA_BASE_URL:-}" ]] || return 1
+  [[ -n "${HARNESS_JIRA_USER_EMAIL:-}" ]] || return 1
+  [[ -n "${HARNESS_JIRA_API_TOKEN:-}" ]] || return 1
+}
+
+harness_stage_status_id() {
+  local stage event
+  stage="${1:-}"
+  event="${2:-}"
+
+  case "$stage:$event" in
+    claim:started) printf 'claim_started\n' ;;
+    executor:started) printf 'executor_started\n' ;;
+    executor:reconciled_to_pr) printf 'executor_reconciled_to_pr\n' ;;
+    executor:blocked) printf 'executor_blocked\n' ;;
+    review:approved) printf 'review_approved\n' ;;
+    review:rejected) printf 'review_rejected\n' ;;
+    review:blocked) printf 'review_blocked\n' ;;
+    prepare:passed) printf 'prepare_passed\n' ;;
+    prepare:failed) printf 'prepare_failed\n' ;;
+    prepare:blocked) printf 'prepare_blocked\n' ;;
+    land:merged) printf 'land_merged\n' ;;
+    land:failed) printf 'land_failed\n' ;;
+    land:blocked) printf 'land_blocked\n' ;;
+    *)
+      harness_die "unsupported stage summary event: $stage/$event"
+      ;;
+  esac
+}
+
+harness_stage_label() {
+  local stage_id
+  stage_id="${1:-}"
+
+  case "$stage_id" in
+    claim_started) printf 'claim started\n' ;;
+    executor_started) printf 'executor started\n' ;;
+    executor_reconciled_to_pr) printf 'executor reconciled to PR\n' ;;
+    executor_blocked) printf 'executor blocked\n' ;;
+    review_approved) printf 'review approved\n' ;;
+    review_rejected) printf 'review rejected\n' ;;
+    review_blocked) printf 'review blocked\n' ;;
+    prepare_passed) printf 'prepare passed\n' ;;
+    prepare_failed) printf 'prepare failed\n' ;;
+    prepare_blocked) printf 'prepare blocked\n' ;;
+    land_merged) printf 'land merged\n' ;;
+    land_failed) printf 'land failed\n' ;;
+    land_blocked) printf 'land blocked\n' ;;
+    *)
+      harness_die "unsupported stage label: $stage_id"
+      ;;
+  esac
+}
+
+harness_stage_operator_action() {
+  local stage_id
+  stage_id="${1:-}"
+
+  case "$stage_id" in
+    executor_blocked)
+      printf 'Inspect the worker outcome, then rerun or requeue the task.'
+      ;;
+    review_rejected)
+      printf 'Inspect the review findings, then revise the PR or close the task.'
+      ;;
+    review_blocked)
+      printf 'Inspect the review run, then rerun review or fix the PR.'
+      ;;
+    prepare_failed|prepare_blocked)
+      printf 'Fix the failing verification gate or blocker, then rerun prepare.'
+      ;;
+    land_failed|land_blocked)
+      printf 'Resolve the merge or checks blocker, then rerun land.'
+      ;;
+    *)
+      printf ''
+      ;;
+  esac
+}
+
+harness_jira_comment() {
+  local issue_key body payload auth_header base_url
+  issue_key="$1"
+  body="$2"
+
+  harness_can_sync_jira || return 1
+  [[ -n "$issue_key" ]] || return 1
+
+  payload=$(jq -nc --arg body "$body" '{body:$body}')
+  auth_header=$(printf '%s:%s' "$HARNESS_JIRA_USER_EMAIL" "$HARNESS_JIRA_API_TOKEN" | base64 | tr -d '\n')
+  base_url="${HARNESS_JIRA_BASE_URL%/}"
+
+  curl -fsS \
+    -H "Authorization: Basic $auth_header" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -X POST \
+    -d "$payload" \
+    "$base_url/rest/api/2/issue/$issue_key/comment" >/dev/null
+}
+
+harness_sync_jira_stage_summary() {
+  local task_id stage_id happened pr_url blocked_reason next_action task_json jira_issue_key issue_number repo_slug issue_reference comment_body issue_body
+  task_id="$1"
+  stage_id="$2"
+  happened="${3:-}"
+  pr_url="${4:-}"
+  blocked_reason="${5:-}"
+  next_action="${6:-}"
+
+  harness_can_sync_jira || return 0
+  harness_task_exists "$task_id" || return 0
+
+  task_json=$(harness_task_json "$task_id")
+  jira_issue_key=$(printf '%s' "$task_json" | jq -r '.jira_issue_key // ""')
+  if [[ -z "$jira_issue_key" ]]; then
+    issue_body=$(printf '%s' "$task_json" | jq -r '.issue_body // ""')
+    jira_issue_key=$(harness_extract_jira_issue_key_from_text "$issue_body" 2>/dev/null || true)
+  fi
+  [[ -n "$jira_issue_key" ]] || return 0
+
+  issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
+  repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
+  issue_reference=$(harness_control_room_reference "$task_id" "$issue_number" "$repo_slug")
+
+  happened=$(harness_truncate_text "$happened" 320)
+  blocked_reason=$(harness_truncate_text "$blocked_reason" 220)
+  next_action=$(harness_truncate_text "$next_action" 220)
+
+  comment_body=$(
+    cat <<EOF
+Harness stage update
+
+- task: \`$task_id\`
+- issue: \`$issue_reference\`
+- stage: \`$(harness_stage_label "$stage_id")\`
+- happened: $happened
+$(if [[ -n "$pr_url" ]]; then printf -- '- pr: %s\n' "$pr_url"; fi)$(if [[ -n "$blocked_reason" ]]; then printf -- '- blocked_reason: %s\n' "$blocked_reason"; fi)$(if [[ -n "$next_action" ]]; then printf -- '- operator_action: %s\n' "$next_action"; fi)
+EOF
+  )
+
+  if ! harness_jira_comment "$jira_issue_key" "$comment_body"; then
+    harness_notice "jira comment sync failed for $jira_issue_key ($stage_id)"
+  fi
+}
+
+harness_record_stage_summary() {
+  local task_id stage event happened pr_url blocked_reason next_action stage_id task_json status_file summary_json now had_lock issue_number repo_slug issue_reference jira_issue_key issue_body
+  task_id="$1"
+  stage="$2"
+  event="$3"
+  happened="${4:-}"
+  pr_url="${5:-}"
+  blocked_reason="${6:-}"
+  next_action="${7:-}"
+
+  harness_load_project_env
+  harness_prepare_state
+  harness_task_exists "$task_id" || return 0
+
+  stage_id=$(harness_stage_status_id "$stage" "$event")
+  if [[ -z "$next_action" ]]; then
+    next_action=$(harness_stage_operator_action "$stage_id")
+  fi
+
+  had_lock="${HARNESS_LOCK_HELD:-0}"
+  harness_acquire_lock
+  status_file=$(harness_task_status_path "$task_id")
+  if [[ ! -f "$status_file" ]]; then
+    if [[ "$had_lock" != "1" ]]; then
+      harness_release_lock
+    fi
+    return 0
+  fi
+
+  task_json=$(cat "$status_file")
+  issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
+  repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
+  jira_issue_key=$(printf '%s' "$task_json" | jq -r '.jira_issue_key // ""')
+  if [[ -z "$jira_issue_key" ]]; then
+    issue_body=$(printf '%s' "$task_json" | jq -r '.issue_body // ""')
+    jira_issue_key=$(harness_extract_jira_issue_key_from_text "$issue_body" 2>/dev/null || true)
+  fi
+  issue_reference=$(harness_control_room_reference "$task_id" "$issue_number" "$repo_slug")
+  now=$(harness_now_utc)
+
+  summary_json=$(jq -nc \
+    --arg recorded_at "$now" \
+    --arg stage "$stage" \
+    --arg event "$event" \
+    --arg stage_id "$stage_id" \
+    --arg task_id "$task_id" \
+    --arg issue_reference "$issue_reference" \
+    --arg repo_slug "$repo_slug" \
+    --arg jira_issue_key "$jira_issue_key" \
+    --arg pr_url "$pr_url" \
+    --arg happened "$happened" \
+    --arg blocked_reason "$blocked_reason" \
+    --arg next_action "$next_action" \
+    --argjson issue_number "${issue_number:-null}" \
+    '{
+      recorded_at: $recorded_at,
+      stage: $stage,
+      event: $event,
+      stage_id: $stage_id,
+      task_id: $task_id,
+      issue_number: $issue_number,
+      repo_slug: $repo_slug,
+      issue_reference: $issue_reference,
+      jira_issue_key: $jira_issue_key,
+      pr_url: $pr_url,
+      happened: $happened,
+      blocked_reason: $blocked_reason,
+      next_action: $next_action
+    }')
+
+  jq \
+    --arg updated_at "$now" \
+    --argjson summary "$summary_json" '
+      .updated_at = $updated_at
+      | .last_stage_summary = $summary
+      | .stage_summaries = ((.stage_summaries // []) + [$summary])
+    ' "$status_file" >"$status_file.tmp"
+  mv "$status_file.tmp" "$status_file"
+
+  if [[ "$had_lock" != "1" ]]; then
+    harness_release_lock
+  fi
+
+  harness_sync_jira_stage_summary "$task_id" "$stage_id" "$happened" "$pr_url" "$blocked_reason" "$next_action"
 }
 
 harness_status_check_summary() {

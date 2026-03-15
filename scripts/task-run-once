@@ -443,6 +443,7 @@ fi
 
 emit_log "claimed" "claimed issue and launching Codex" "$issue_number" "$task_id" "$title"
 harness_update_claim_status "$claim_key" "in_progress" "executor running" "$worker_log"
+harness_record_stage_summary "$task_id" "executor" "started" "Executor started a Codex worker for the claimed task."
 
 worker_prompt=$(cat <<EOF
 Read .harness-session/codex/AGENTS.md, .harness-session/codex/TASK.md, and .harness-session/codex/PR_BODY.md from the current repository root. Follow them exactly and complete the task end-to-end.

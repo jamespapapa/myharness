@@ -86,6 +86,7 @@ fi
 if [[ "$merged" -eq 1 ]]; then
   harness_remove_claim "$claim_key"
   harness_update_task_status "$task_id" "done" "merged" "$pr_url"
+  harness_record_stage_summary "$task_id" "land" "merged" "Land merged the task PR." "$pr_url"
   if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
     harness_issue_done "$repo_slug" "$issue_number" "$pr_url"
   fi
@@ -96,6 +97,7 @@ fi
 if [[ -n "$blocked_reason" ]]; then
   harness_remove_claim "$claim_key"
   harness_update_task_status "$task_id" "blocked" "$blocked_reason" ""
+  harness_record_stage_summary "$task_id" "executor" "blocked" "Executor could not advance the task to a PR." "" "$blocked_reason"
   harness_control_room_notify "blocked" "executor" "$task_id" "$issue_number" "$repo_slug" "$blocked_reason"
   if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
     harness_issue_blocked "$repo_slug" "$issue_number" "$blocked_reason"
@@ -107,6 +109,7 @@ fi
 if [[ -n "$pr_url" ]]; then
   harness_remove_claim "$claim_key"
   harness_update_task_status "$task_id" "pr_open" "pr opened" "$pr_url"
+  harness_record_stage_summary "$task_id" "executor" "reconciled_to_pr" "Executor reconciled the task to an open PR." "$pr_url"
   if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
     harness_issue_pr_open "$repo_slug" "$issue_number" "$pr_url"
   fi

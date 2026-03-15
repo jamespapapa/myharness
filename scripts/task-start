@@ -126,12 +126,14 @@ openclaw_session=$(printf '%s' "$task_json" | jq -r '.openclaw_session')
 if [[ -n "$issue_number" ]]; then
   harness_write_claim "$claim_key" "$repo_slug" "$issue_number" "$task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "in_progress"
   harness_update_task_status "$task_id" "in_progress"
+  harness_record_stage_summary "$task_id" "claim" "started" "Claim started and created the isolated task workspace on branch $branch."
   if harness_can_sync_github; then
     harness_issue_started "$repo_slug" "$issue_number" "$task_id" "$branch" "$worktree"
   fi
 else
   harness_write_claim "$claim_key" "" "" "$task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "in_progress"
   harness_update_task_status "$task_id" "in_progress"
+  harness_record_stage_summary "$task_id" "claim" "started" "Claim started and created the isolated task workspace on branch $branch."
 fi
 
 printf 'task ready: %s\n' "$task_id"

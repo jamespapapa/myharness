@@ -56,6 +56,8 @@ harness_prepare_state
 repo_root=$(harness_repo_root)
 repo_slug=""
 issue_url=""
+jira_issue_key=""
+jira_issue_url=""
 
 if [[ -n "$issue_number" ]]; then
   repo_slug=$(harness_repo_slug 2>/dev/null || true)
@@ -72,6 +74,11 @@ else
   [[ -n "$task_id" ]] || harness_die "local tasks require --task-id"
   [[ -n "$title" ]] || harness_die "local tasks require --title"
   issue_json=""
+fi
+
+jira_issue_key=$(harness_extract_jira_issue_key_from_text "$body" 2>/dev/null || true)
+if [[ -n "$jira_issue_key" ]]; then
+  jira_issue_url=$(harness_jira_issue_url "$jira_issue_key" 2>/dev/null || true)
 fi
 
 if [[ -z "$base_branch" ]]; then
@@ -113,15 +120,19 @@ cat >"$task_dir/task.json" <<EOF
   "task_id": "$task_id",
   "issue_number": ${issue_number:-null},
   "title": $(printf '%s' "$title" | jq -Rs .),
+  "issue_body": $(printf '%s' "$body" | jq -Rs .),
   "issue_url": $(printf '%s' "$issue_url" | jq -Rs .),
   "repo_slug": $(printf '%s' "$repo_slug" | jq -Rs .),
+  "jira_issue_key": $(printf '%s' "$jira_issue_key" | jq -Rs .),
+  "jira_issue_url": $(printf '%s' "$jira_issue_url" | jq -Rs .),
   "branch": $(printf '%s' "$branch" | jq -Rs .),
   "base_branch": $(printf '%s' "$base_branch" | jq -Rs .),
   "base_remote_ref": $(printf '%s' "$base_remote_ref" | jq -Rs .),
   "base_sha": $(printf '%s' "$base_sha" | jq -Rs .),
   "worktree": $(printf '%s' "$worktree" | jq -Rs .),
   "status": "created",
-  "created_at": "$(harness_now_utc)"
+  "created_at": "$(harness_now_utc)",
+  "stage_summaries": []
 }
 EOF
 

@@ -17,8 +17,10 @@ What this repo gives you:
 - isolated task worktrees with paired OpenClaw and Codex sessions
 - one repo-level control-room wake path for channel/cron usage
 - one-shot executor, review, prepare, and land workers
+- stage-by-stage summaries stored on each local task record
 - tracked review / prepare / land artifacts under `artifacts/`
 - GitHub label and issue-state synchronization
+- optional Jira issue comment sync for linked tasks
 - optional Discord control-room updates for blocked and rejected outcomes
 - default queue gating so autonomous fetch consumes only issues labeled `Ready`
 
@@ -27,8 +29,9 @@ What you still need before using this on a real codebase:
 1. Replace [.harness/prepare.commands](/Users/jules/Desktop/work/myharness/.harness/prepare.commands) with project-specific `lint`, `test`, `build`, or invariant gates.
 2. Turn on required-check enforcement in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) by setting `HARNESS_REQUIRE_GREEN_CHECKS="1"` if you want merge to wait for GitHub checks.
 3. Set `HARNESS_CONTROL_ROOM_DISCORD_WEBHOOK_URL` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) if you want blocked executor/review/prepare/land outcomes and review rejections to post concise operator-facing lines to a Discord control-room channel.
-4. Add GitHub issue forms or use `scripts/task-intake` consistently, because this seed repo does not yet enforce intake quality through `.github/ISSUE_TEMPLATE/`.
-5. If you want multiple repo channels or wider fan-out, add them on top of the control-room tick intentionally; the safe default here is one repo channel plus one serialized wake loop.
+4. Set `HARNESS_JIRA_BASE_URL`, `HARNESS_JIRA_USER_EMAIL`, and `HARNESS_JIRA_API_TOKEN` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env), then include `Jira: ABC-123` or a Jira browse URL in the task body if you want linked tasks to sync concise stage comments into Jira.
+5. Add GitHub issue forms or use `scripts/task-intake` consistently, because this seed repo does not yet enforce intake quality through `.github/ISSUE_TEMPLATE/`.
+6. If you want multiple repo channels or wider fan-out, add them on top of the control-room tick intentionally; the safe default here is one repo channel plus one serialized wake loop.
 
 Quick start:
 
