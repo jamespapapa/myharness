@@ -61,6 +61,20 @@ Before you trust autonomous merge on a real repository:
 5. Add GitHub issue forms, or require all intake to flow through `scripts/task-intake`.
 6. Decide how many executor workers you want, update `topology.execution.slot_count` plus `topology.execution.channels[]` in [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml), then add the corresponding cron jobs.
 
+## Documentation Coverage Gate
+
+Prepare now runs `scripts/check-doc-coverage` before the normal prepare command list, even when the PR is docs-only.
+
+That gate reads [`.harness/doc-coverage.rules.json`](/Users/jules/Desktop/work/myharness/.harness/doc-coverage.rules.json) and fails when:
+
+- architecture-sensitive paths change without a mapped architecture/admin doc update,
+- schema-sensitive paths change without a mapped contract/admin doc update,
+- integration-sensitive paths change without a mapped admin/sync doc update,
+- operator-policy or verification-gate paths change without a mapped runbook update,
+- a new critical doc appears under `ops/` or the major `docs/` categories and `AGENTS.md` does not reference it.
+
+Local `scripts/check-harness` runs the same gate so workers see the failure before review or prepare.
+
 ## Manager Session
 
 Launch OpenClaw from the generated manager workspace:

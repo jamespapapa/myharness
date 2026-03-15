@@ -71,6 +71,7 @@ Current priority order:
 - Docs-only changes should use the lightest valid verification path.
 - Verification should be scope-aware: changed paths decide which gates run.
 - The path-to-lane mapping must live in an executable rule file, not only in prose.
+- Architecture, schema, integration, and operator-flow changes must update mapped docs; `scripts/check-doc-coverage` enforces this from `.harness/doc-coverage.rules.json`.
 - Runtime or policy changes must record exact commands run and results.
 - Prefer build/check/test gates over intuition.
 - Keep local hooks and CI aligned so the same class of failure is caught before review.
@@ -143,6 +144,8 @@ When adding the harness kernel, prioritize these files:
 - [ops/MULTI_PROJECT_MODEL.md](ops/MULTI_PROJECT_MODEL.md) — control-tower + execution-channel topology, runner model, and dispatch expectations
 - [ops/HARNESS_SYNC.md](ops/HARNESS_SYNC.md) — core-owned vs project-owned paths and sync-only update flow
 - [ops/PROJECT_AGENTS_CONTRACT.md](ops/PROJECT_AGENTS_CONTRACT.md) — what project AGENTS.md should contain and how doc mapping should work
+- [ops/HARNESS_ADMIN.md](ops/HARNESS_ADMIN.md) — operator flow, prepare/check behavior, and runtime administration
+- [ops/AUTONOMOUS_SWARM.md](ops/AUTONOMOUS_SWARM.md) — lane ordering and autonomous control-room execution model
 
 ## Success Criteria
 

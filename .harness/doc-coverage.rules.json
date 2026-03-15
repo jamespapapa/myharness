@@ -1,0 +1,89 @@
+{
+  "agents_doc_map": "AGENTS.md",
+  "critical_doc_patterns": [
+    "^ops/[^/]+\\.md$",
+    "^docs/(architecture|schemas|integrations|runbooks|release)/.+\\.md$"
+  ],
+  "rules": [
+    {
+      "id": "architecture",
+      "description": "Control-tower topology, workspace/worktree flow, or lane orchestration changed.",
+      "change_patterns": [
+        "^\\.harness/project\\.yaml$",
+        "^scripts/(task-create|task-next|task-start|task-run-once|task-control-room-once|openclaw-manager-setup)$"
+      ],
+      "doc_patterns": [
+        "^AGENTS\\.md$",
+        "^ops/MULTI_PROJECT_MODEL\\.md$",
+        "^ops/HARNESS_SYNC\\.md$",
+        "^ops/HARNESS_ADMIN\\.md$"
+      ],
+      "doc_targets": [
+        "AGENTS.md",
+        "ops/MULTI_PROJECT_MODEL.md",
+        "ops/HARNESS_SYNC.md",
+        "ops/HARNESS_ADMIN.md"
+      ]
+    },
+    {
+      "id": "schema",
+      "description": "Artifact schema, manifest shape, or review/prepare/land contracts changed.",
+      "change_patterns": [
+        "^\\.harness/project\\.yaml$",
+        "^scripts/(task-review|task-review-once|task-prepare|task-prepare-once|task-land|task-land-once)$"
+      ],
+      "doc_patterns": [
+        "^AGENTS\\.md$",
+        "^ops/PROJECT_AGENTS_CONTRACT\\.md$",
+        "^ops/HARNESS_ADMIN\\.md$",
+        "^ops/HARNESS_SYNC\\.md$"
+      ],
+      "doc_targets": [
+        "AGENTS.md",
+        "ops/PROJECT_AGENTS_CONTRACT.md",
+        "ops/HARNESS_ADMIN.md",
+        "ops/HARNESS_SYNC.md"
+      ]
+    },
+    {
+      "id": "integration",
+      "description": "GitHub, Jira, or control-room integration behavior changed.",
+      "change_patterns": [
+        "^\\.harness/project\\.env$",
+        "^scripts/(task-finish|check-control-room-notifications|check-stage-reporting)$"
+      ],
+      "doc_patterns": [
+        "^AGENTS\\.md$",
+        "^ops/HARNESS_ADMIN\\.md$",
+        "^ops/HARNESS_SYNC\\.md$"
+      ],
+      "doc_targets": [
+        "AGENTS.md",
+        "ops/HARNESS_ADMIN.md",
+        "ops/HARNESS_SYNC.md"
+      ]
+    },
+    {
+      "id": "ops",
+      "description": "Operator policy, runtime profiles, or executable verification gates changed.",
+      "change_patterns": [
+        "^\\.harness/doc-coverage\\.rules\\.json$",
+        "^\\.harness/prepare\\.commands$",
+        "^\\.harness/profiles/[^/]+/AGENTS\\.md$",
+        "^scripts/(check-doc-coverage|check-harness|check-manager-workspace|check-project-manifest|check-task-control-room-once|check-task-run-once)$"
+      ],
+      "doc_patterns": [
+        "^AGENTS\\.md$",
+        "^ops/HARNESS_ADMIN\\.md$",
+        "^ops/AUTONOMOUS_SWARM\\.md$",
+        "^ops/PROJECT_AGENTS_CONTRACT\\.md$"
+      ],
+      "doc_targets": [
+        "AGENTS.md",
+        "ops/HARNESS_ADMIN.md",
+        "ops/AUTONOMOUS_SWARM.md",
+        "ops/PROJECT_AGENTS_CONTRACT.md"
+      ]
+    }
+  ]
+}
