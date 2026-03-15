@@ -6,7 +6,8 @@
     ".harness/path-ownership.json",
     "ops/HARNESS_SYNC.md",
     "scripts/check-harness",
-    "scripts/check-sync-owned-paths"
+    "scripts/check-sync-owned-paths",
+    "ops/HARNESS_ADMIN.md"
   ],
   "overlay_conflicts": [],
   "verification": [
