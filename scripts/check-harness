@@ -38,6 +38,7 @@ scripts=(
   scripts/check-control-room-notifications
   scripts/check-release-tracking
   scripts/check-review-outcomes
+  scripts/check-sync-owned-paths
   scripts/check-stage-reporting
   scripts/check-task-control-room-once
   scripts/check-task-run-once
@@ -70,6 +71,8 @@ scripts/check-project-agents-contract --self-test
 scripts/check-control-room-notifications
 scripts/check-release-tracking
 scripts/check-review-outcomes
+scripts/check-sync-owned-paths --self-test
+scripts/check-sync-owned-paths
 scripts/check-stage-reporting
 scripts/check-task-control-room-once
 scripts/check-task-run-once

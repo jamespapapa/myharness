@@ -37,13 +37,25 @@ These paths belong to the project overlay and may be edited locally:
 - `docs/**`
 - product source code
 
-## Enforcement Direction
+## Executable Ownership Manifest
 
-The long-term enforcement model should use an explicit manifest, for example:
+This repo now treats `.harness/path-ownership.json` as the executable ownership map.
 
-- `.harness/core-owned-paths.json`
-- `.harness/project-owned-paths.json`
-- or one combined sync manifest
+It records:
+
+- sync-owned `core_owned_paths`,
+- explicitly local `project_owned_paths`,
+- sync metadata paths that authorize shared-core changes.
+
+Anything not listed under `core_owned_paths` remains project-local by default.
+
+Current project-local exceptions include:
+
+- `.harness/project.env`
+- `.harness/prepare.commands`
+- `.harness/project.yaml`
+- `AGENTS.md`
+- `docs/**`
 
 The manifest should be executable truth, not just prose. The project topology overlay already follows that rule through `.harness/project.yaml`.
 
@@ -95,6 +107,20 @@ A sync issue should record:
 
 `scripts/task-sync-request` creates that shape as an ordinary issue body so the resulting work item can move through the same claim, review, prepare, and land flow as any other task.
 
+Until there is a dedicated sync command, the branch must carry explicit sync metadata at:
+
+- `artifacts/sync/<sync-id>/sync.json`
+- optional human note: `artifacts/sync/<sync-id>/sync.md`
+
+The JSON metadata must include:
+
+- `sync_id`
+- `source_harness_core_revision`
+- `target_repo`
+- `shared_paths`
+- `overlay_conflicts`
+- `verification`
+
 ## Prepare / Check Expectations
 
 A project should eventually fail verification when:
@@ -102,6 +128,13 @@ A project should eventually fail verification when:
 - a core-owned path was edited directly without sync metadata,
 - a sync changed contract-sensitive files but docs or operator notes were not updated,
 - a repo claims to be synced to a given core version but local shared files do not match.
+
+The local enforcement path in this repo is now:
+
+1. `scripts/check-sync-owned-paths` computes branch changes against the configured base branch,
+2. it blocks edits to `core_owned_paths` unless valid `artifacts/sync/<sync-id>/sync.json` metadata is present,
+3. `scripts/check-harness` runs that gate, and
+4. `task-prepare` inherits it through `.harness/prepare.commands`.
 
 ## Local Hotfix Rule
 
@@ -113,6 +146,8 @@ If a project repo must hotfix a shared harness-core path locally to unblock work
 - remove the divergence through the next sync.
 
 Local divergence should be rare and short-lived.
+
+If a temporary local hotfix touches a sync-owned path, the same branch must still include sync metadata so the divergence is visible and auditable.
 
 ## Success Criteria
 

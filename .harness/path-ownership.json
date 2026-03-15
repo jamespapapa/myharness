@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "default_owner": "project-overlay",
+  "core_owned_paths": [
+    ".github/**",
+    ".harness/path-ownership.json",
+    ".harness/profiles/**",
+    "ops/**",
+    "scripts/**"
+  ],
+  "project_owned_paths": [
+    ".harness/prepare.commands",
+    ".harness/project.env",
+    ".harness/project.yaml",
+    "AGENTS.md",
+    "docs/**"
+  ],
+  "sync_metadata_paths": [
+    "artifacts/sync/**/sync.json"
+  ]
+}
