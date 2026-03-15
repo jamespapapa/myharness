@@ -1,2 +1,2 @@
 # One command per line. Commands run from the task worktree root.
-./scripts/check-harness
+./scripts/check-harness --skip-doc-coverage

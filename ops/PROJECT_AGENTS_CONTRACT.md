@@ -91,6 +91,17 @@ When a task changes any of the following, documentation should be part of done:
 
 And when a new important document appears, AGENTS should be updated to map to it.
 
+In this repo, that expectation is enforced by [`scripts/check-doc-coverage`](../scripts/check-doc-coverage) using the explicit path rules in [`.harness/doc-coverage.rules.json`](../.harness/doc-coverage.rules.json).
+
+The rule stays scope-aware on purpose:
+
+- architecture-sensitive paths require updates in mapped architecture docs,
+- schema-sensitive paths require updates in mapped contract docs,
+- integration-sensitive paths require updates in mapped integration or admin docs,
+- operator-policy changes require updates in mapped runbooks or admin docs.
+
+If a new critical doc appears under `ops/` or the major `docs/` categories, `AGENTS.md` must reference that path before the gate passes.
+
 ## Minimal Example Shape
 
 ```markdown
