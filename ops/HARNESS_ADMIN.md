@@ -79,7 +79,7 @@ That gate reads [`.harness/doc-coverage.rules.json`](/Users/jules/Desktop/work/m
 - operator-policy or verification-gate paths change without a mapped runbook update,
 - a new critical doc appears under `ops/` or the major `docs/` categories and `AGENTS.md` does not reference it.
 
-Local `scripts/check-harness` runs the same gate so workers see the failure before review or prepare.
+Local `scripts/check-harness` runs the same gate so workers see the failure before review or prepare, and it now also enforces review-outcome coverage plus sync-owned path metadata checks before landing.
 
 ## Manager Session
 
