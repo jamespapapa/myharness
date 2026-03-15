@@ -15,7 +15,7 @@
 
 ## Core Workflow
 
-1. If the work does not exist yet, create it with `__SCRIPTS_DIR__/task-intake`.
+1. If the work does not exist yet, create it with `__SCRIPTS_DIR__/task-intake`, or use `__SCRIPTS_DIR__/task-sync-request` when the operator is propagating a harness-core update into this repo.
 2. Pick work with `__SCRIPTS_DIR__/task-next` or `__SCRIPTS_DIR__/task-start --next`.
 3. Claim and materialize the task with `__SCRIPTS_DIR__/task-start`.
 4. Prefer the repo-level `__SCRIPTS_DIR__/task-control-room-once` wake loop when you want one channel or cron job to keep advancing active work before claiming more.
@@ -33,6 +33,8 @@
 ## Required Commands
 
 - Create a GitHub issue: `__SCRIPTS_DIR__/task-intake --title "<title>" --body "<body>"`
+- Queue a harness sync issue: `__SCRIPTS_DIR__/task-sync-request --source-ref "<core-ref>"`
+- Create and start a harness sync issue: `__SCRIPTS_DIR__/task-sync-request --source-ref "<core-ref>" --start`
 - Create and start immediately: `__SCRIPTS_DIR__/task-intake --title "<title>" --body "<body>" --start`
 - Next eligible issue: `__SCRIPTS_DIR__/task-next`
 - Repo control-room cycle: `__SCRIPTS_DIR__/task-control-room-once`

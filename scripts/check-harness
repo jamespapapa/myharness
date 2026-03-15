@@ -33,6 +33,7 @@ scripts=(
   scripts/check-harness
   scripts/check-project-manifest
   scripts/check-manager-workspace
+  scripts/check-sync-request
   scripts/check-control-room-notifications
   scripts/check-review-outcomes
   scripts/check-stage-reporting
@@ -52,6 +53,7 @@ scripts=(
   scripts/task-review-once
   scripts/task-run-once
   scripts/task-start
+  scripts/task-sync-request
 )
 
 bash -n "${scripts[@]}"
@@ -61,6 +63,7 @@ fi
 scripts/check-doc-coverage --self-test
 scripts/check-project-manifest
 scripts/check-manager-workspace
+scripts/check-sync-request
 scripts/check-control-room-notifications
 scripts/check-review-outcomes
 scripts/check-stage-reporting

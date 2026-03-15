@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SOURCE_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
+DEFAULTS_FILE="$SOURCE_ROOT/.harness/sync-request.defaults.json"
+
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+jq -e '
+  .schema_version == 1
+  and (.shared_paths | type == "array" and length >= 1 and all(.[]; type == "string" and length > 0))
+  and (.overlay_conflict_points | type == "array" and length >= 1 and all(.[]; type == "string" and length > 0))
+  and (.verification_requirements | type == "array" and length >= 1 and all(.[]; type == "string" and length > 0))
+' "$DEFAULTS_FILE" >/dev/null
+
+setup_fixture() {
+  local name="$1"
+
+  FIXTURE_DIR="$TMP_DIR/$name"
+  REPO_DIR="$FIXTURE_DIR/repo"
+  BIN_DIR="$FIXTURE_DIR/bin"
+  MOCK_STATE_DIR="$FIXTURE_DIR/mock-gh"
+
+  mkdir -p "$BIN_DIR" "$MOCK_STATE_DIR"
+  rsync -a \
+    --exclude '.git' \
+    --exclude '.harness/state' \
+    --exclude '.harness/tasks' \
+    --exclude '.harness/logs' \
+    --exclude '.harness-manager' \
+    --exclude '.harness-session' \
+    "$SOURCE_ROOT/" "$REPO_DIR/"
+
+  git -C "$REPO_DIR" init -q -b main
+  git -C "$REPO_DIR" config user.name "Harness Test"
+  git -C "$REPO_DIR" config user.email "harness-test@example.com"
+  git -C "$REPO_DIR" add .
+  git -C "$REPO_DIR" commit -qm "fixture"
+
+  cat >"$BIN_DIR/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_dir="${HARNESS_MOCK_GH_STATE_DIR:?}"
+repo_slug="${HARNESS_MOCK_GH_REPO:-example/test-harness}"
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  auth)
+    if [[ "${1:-}" == "status" ]]; then
+      exit 0
+    fi
+    ;;
+  repo)
+    if [[ "${1:-}" == "view" ]]; then
+      printf '%s\n' "$repo_slug"
+      exit 0
+    fi
+    ;;
+  label)
+    case "${1:-}" in
+      list)
+        cat "$state_dir/existing-labels.txt" 2>/dev/null || true
+        exit 0
+        ;;
+      create)
+        shift
+        label_name=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            -R|--repo|--color|--description)
+              shift 2
+              ;;
+            *)
+              label_name="${1:-}"
+              shift
+              ;;
+          esac
+        done
+        printf '%s\n' "$label_name" >>"$state_dir/existing-labels.txt"
+        exit 0
+        ;;
+    esac
+    ;;
+  issue)
+    if [[ "${1:-}" == "create" ]]; then
+      shift
+      title=""
+      body=""
+      labels=()
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          -R)
+            shift 2
+            ;;
+          --title)
+            title="${2:-}"
+            shift 2
+            ;;
+          --body)
+            body="${2:-}"
+            shift 2
+            ;;
+          --label)
+            labels+=("${2:-}")
+            shift 2
+            ;;
+          *)
+            shift
+            ;;
+        esac
+      done
+      printf '%s' "$title" >"$state_dir/title.txt"
+      printf '%s' "$body" >"$state_dir/body.md"
+      printf '%s\n' "${labels[@]-}" >"$state_dir/issue-labels.txt"
+      printf 'https://example.test/issues/4242\n'
+      exit 0
+    fi
+    ;;
+esac
+
+printf 'unsupported gh invocation: %s %s\n' "$cmd" "$*" >&2
+exit 1
+EOF
+  chmod +x "$BIN_DIR/gh"
+}
+
+assert_eq() {
+  local actual="$1"
+  local expected="$2"
+  local message="$3"
+
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'assert_eq failed: %s\nexpected: %s\nactual:   %s\n' "$message" "$expected" "$actual" >&2
+    exit 1
+  fi
+}
+
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local message="$3"
+
+  if [[ "$haystack" != *"$needle"* ]]; then
+    printf 'assert_contains failed: %s\nneedle: %s\nhaystack: %s\n' "$message" "$needle" "$haystack" >&2
+    exit 1
+  fi
+}
+
+sync_env() {
+  env \
+    PATH="$BIN_DIR:$PATH" \
+    HARNESS_MOCK_GH_STATE_DIR="$MOCK_STATE_DIR" \
+    HARNESS_MOCK_GH_REPO="example/test-harness" \
+    "$@"
+}
+
+scenario_creates_structured_sync_issue() {
+  local output title body labels existing_labels
+
+  setup_fixture "create-sync-issue"
+  output=$(sync_env "$REPO_DIR/scripts/task-sync-request" --source-ref "harness-core@abc1234")
+  assert_contains "$output" "issue created: #4242" "sync request should create a normal issue"
+
+  title=$(cat "$MOCK_STATE_DIR/title.txt")
+  body=$(cat "$MOCK_STATE_DIR/body.md")
+  labels=$(cat "$MOCK_STATE_DIR/issue-labels.txt")
+  existing_labels=$(cat "$MOCK_STATE_DIR/existing-labels.txt")
+
+  assert_eq "$title" "Sync harness core from harness-core@abc1234" "title should default from source ref"
+  assert_contains "$labels" "Ready" "sync issue should enter the normal queue by default"
+  assert_contains "$existing_labels" "Ready" "queue label should be created when missing"
+  assert_contains "$body" 'Source harness-core version / commit: `harness-core@abc1234`' "body should record the source ref"
+  assert_contains "$body" 'Target repo: `example/test-harness`' "body should record the target repo"
+  assert_contains "$body" '## Expected Shared-Path Updates' "body should include shared path section"
+  assert_contains "$body" '- `scripts/`' "body should include default shared paths"
+  assert_contains "$body" '## Likely Overlay Conflict Points' "body should include overlay conflict section"
+  assert_contains "$body" '- `.harness/project.yaml`' "body should include default overlay conflict points"
+  assert_contains "$body" '## Verification Requirements' "body should include verification requirements"
+  assert_contains "$body" 'Run `scripts/check-harness`.' "body should include default verification guidance"
+}
+
+scenario_start_passthrough_skips_queue_label() {
+  local output labels start_args
+
+  setup_fixture "start-sync-issue"
+  cat >"$REPO_DIR/scripts/task-start" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >"${HARNESS_TEST_TASK_START_ARGS:?}"
+printf 'task-start stub\n'
+EOF
+  chmod +x "$REPO_DIR/scripts/task-start"
+
+  output=$(sync_env HARNESS_TEST_TASK_START_ARGS="$MOCK_STATE_DIR/task-start.args" "$REPO_DIR/scripts/task-sync-request" --source-ref "harness-core@def456" --start)
+  assert_contains "$output" "task-start stub" "start mode should hand the created issue to task-start"
+
+  labels=$(cat "$MOCK_STATE_DIR/issue-labels.txt")
+  start_args=$(cat "$MOCK_STATE_DIR/task-start.args")
+
+  assert_eq "$labels" "" "start mode should not add the queue label before claiming the issue"
+  assert_eq "$start_args" "--issue 4242" "start mode should pass the created issue number to task-start"
+}
+
+scenario_creates_structured_sync_issue
+scenario_start_passthrough_skips_queue_label
+
+printf 'check-sync-request passed\n'

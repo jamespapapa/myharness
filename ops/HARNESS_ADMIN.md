@@ -119,6 +119,24 @@ To create and immediately claim/start it:
 scripts/task-intake --title "..." --body "..." --start
 ```
 
+If the work is a harness-core propagation request, create the issue with the sync generator instead of freehand body editing:
+
+```bash
+scripts/task-sync-request --source-ref harness-core@abc1234
+scripts/task-sync-request --source-ref harness-core@abc1234 --start
+```
+
+That command creates an ordinary issue with:
+
+- source core version / commit
+- target repo
+- expected shared-path updates
+- likely overlay conflict points
+- verification requirements
+
+The default values come from `.harness/sync-request.defaults.json`.
+If this specific sync needs different scope or proof, pass `--shared-path`, `--overlay-conflict`, `--verify`, or `--migration-note`; explicit flags override the tracked defaults for that request only.
+
 ## Issue Authoring Contract
 
 If you are creating issues manually in GitHub, keep the body structured so the worker does not have to infer intent:
@@ -410,6 +428,20 @@ From the manager workspace:
 
 ```bash
 ../../scripts/task-intake --title "..." --body "..." --start
+```
+
+### “OpenClaw manager, the harness core changed; sync this repo”
+
+From the manager workspace:
+
+```bash
+../../scripts/task-sync-request --source-ref harness-core@abc1234
+```
+
+To open and claim it immediately:
+
+```bash
+../../scripts/task-sync-request --source-ref harness-core@abc1234 --start
 ```
 
 ### “Codex, work issue #123”

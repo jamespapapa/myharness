@@ -29,9 +29,11 @@ EXPECTED_HARNESS_REL='../../../../.harness'
 [[ -f "$AGENTS" ]] || { printf 'missing AGENTS.md at %s\n' "$AGENTS" >&2; exit 1; }
 
 grep -q "${EXPECTED_SCRIPTS_REL}/task-control-room-once" "$START" || { printf 'START.md missing rendered task-control-room-once path\n' >&2; exit 1; }
+grep -q "${EXPECTED_SCRIPTS_REL}/task-sync-request --source-ref " "$START" || { printf 'START.md missing rendered task-sync-request path\n' >&2; exit 1; }
 grep -q "${EXPECTED_OPS_REL}/HARNESS_ADMIN.md" "$START" || { printf 'START.md missing rendered HARNESS_ADMIN path\n' >&2; exit 1; }
 grep -q "${EXPECTED_HARNESS_REL}/project.yaml" "$START" || { printf 'START.md missing rendered project.yaml path\n' >&2; exit 1; }
 grep -q "${EXPECTED_SCRIPTS_REL}/task-start --issue <n>" "$AGENTS" || { printf 'AGENTS.md missing rendered task-start path\n' >&2; exit 1; }
+grep -q "${EXPECTED_SCRIPTS_REL}/task-sync-request --source-ref " "$AGENTS" || { printf 'AGENTS.md missing rendered task-sync-request path\n' >&2; exit 1; }
 grep -q "${EXPECTED_OPS_REL}/HARNESS_ADMIN.md" "$AGENTS" || { printf 'AGENTS.md missing rendered admin path\n' >&2; exit 1; }
 grep -q "${EXPECTED_HARNESS_REL}/project.yaml" "$AGENTS" || { printf 'AGENTS.md missing rendered project manifest path\n' >&2; exit 1; }
 
