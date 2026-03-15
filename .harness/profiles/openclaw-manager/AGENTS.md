@@ -10,7 +10,8 @@
 
 1. Read `START.md`.
 2. Read `../../ops/HARNESS_ADMIN.md`.
-3. Read `../../.harness/project.env`.
+3. Read `../../.harness/project.yaml`.
+4. Read `../../.harness/project.env`.
 
 ## Core Workflow
 

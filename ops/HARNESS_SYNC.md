@@ -28,6 +28,7 @@ These paths are controlled by harness-core and should be updated only through sy
 
 These paths belong to the project overlay and may be edited locally:
 
+- `.harness/project.yaml`
 - `.harness/project.env`
 - `.harness/prepare.commands`
 - queue policy files
@@ -44,7 +45,7 @@ The long-term enforcement model should use an explicit manifest, for example:
 - `.harness/project-owned-paths.json`
 - or one combined sync manifest
 
-The manifest should be executable truth, not just prose.
+The manifest should be executable truth, not just prose. The project topology overlay already follows that rule through `.harness/project.yaml`.
 
 ## Sync Request Flow
 

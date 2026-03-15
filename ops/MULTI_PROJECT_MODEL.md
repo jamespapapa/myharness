@@ -52,6 +52,32 @@ Per project, the target topology is:
    └─ worktrees/*
 ```
 
+The executable topology contract for that layout lives in `.harness/project.yaml`.
+This repo stores the file as the JSON subset of YAML so the current shell tooling can read it with `jq` without adding a `yq` dependency.
+
+## Project Topology Manifest
+
+`.harness/project.yaml` is the machine-readable overlay that maps the prose model onto concrete project wiring.
+
+It must define:
+
+- `project.slug`: the canonical owner/repo slug
+- `topology.control_tower`: the control-plane channel identity
+- `topology.execution.slot_count`: how many execution slots the project can run concurrently
+- `topology.execution.channels[]`: the execution-channel identities for each slot
+- `topology.runners`: whether the project is single-runner or multi-runner, plus runner/worktree/manager paths
+- `topology.queue_policy`: the default queue-claim behavior for the project
+
+Current harness scripts consume that manifest for:
+
+- default queue label selection,
+- executor slot count,
+- worktree root selection,
+- manager workspace location,
+- control-tower channel metadata exposed to session tooling.
+
+That keeps the single-project seed flow runnable now while creating one declarative surface for future non-Discord transports.
+
 ## Channel Roles
 
 ### Control-Tower Channel
@@ -135,6 +161,7 @@ See [ops/HARNESS_SYNC.md](./HARNESS_SYNC.md) for the enforcement model.
 
 Each project repo may customize only overlay surfaces such as:
 
+- `.harness/project.yaml`
 - `.harness/project.env`
 - `.harness/prepare.commands`
 - queue policy / label policy

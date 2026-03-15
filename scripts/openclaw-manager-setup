@@ -44,6 +44,18 @@ Manual:
 - \`../../ops/AUTONOMOUS_SWARM.md\`
 EOF
 
+cat >>"$HARNESS_MANAGER_DIR/START.md" <<EOF
+
+Project overlay:
+
+- \`../../.harness/project.yaml\`
+- \`../../.harness/project.env\`
+EOF
+
+if topology_summary=$(harness_project_topology_summary 2>/dev/null); then
+  printf '\n%s\n' "$topology_summary" >>"$HARNESS_MANAGER_DIR/START.md"
+fi
+
 printf 'manager workspace ready: %s\n' "$HARNESS_MANAGER_DIR"
 printf 'launch with:\n'
 printf '  cd %q && openclaw\n' "$HARNESS_MANAGER_DIR"

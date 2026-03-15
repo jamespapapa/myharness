@@ -26,6 +26,7 @@ The human manager should spend time deciding scope and priority, not hand-carryi
 ## What Is Included
 
 - Root [AGENTS.md](/Users/jules/Desktop/work/myharness/AGENTS.md): repo-level operating contract.
+- [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml): machine-readable topology, runner, and queue defaults.
 - [project.env](/Users/jules/Desktop/work/myharness/.harness/project.env): harness defaults.
 - Codex task profile: [.harness/profiles/codex/AGENTS.md](/Users/jules/Desktop/work/myharness/.harness/profiles/codex/AGENTS.md)
 - OpenClaw task profile: [.harness/profiles/openclaw-task/AGENTS.md](/Users/jules/Desktop/work/myharness/.harness/profiles/openclaw-task/AGENTS.md)
@@ -44,9 +45,10 @@ The human manager should spend time deciding scope and priority, not hand-carryi
 
 ## Bootstrap
 
-1. Review [project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) and adjust labels or base branch if needed.
-2. Run `scripts/openclaw-manager-setup`.
-3. Start the manager session from `.harness-manager/openclaw`.
+1. Review [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml) and adjust the control-tower channel key, execution channels, runner paths, and queue defaults for the project.
+2. Review [project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) and adjust runtime integrations or base branch settings if needed.
+3. Run `scripts/openclaw-manager-setup`.
+4. Start the manager session from `.harness-manager/openclaw`.
 
 ## Production Checklist
 
@@ -54,10 +56,10 @@ Before you trust autonomous merge on a real repository:
 
 1. Update [.harness/prepare.commands](/Users/jules/Desktop/work/myharness/.harness/prepare.commands) with the repo's real `lint`, `test`, `build`, and invariant commands.
 2. Set `HARNESS_REQUIRE_GREEN_CHECKS="1"` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) if GitHub checks must be green before merge.
-3. Confirm the queue gate you want in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) (current default: `HARNESS_AUTONOMOUS_LABEL="Ready"`).
+3. Confirm the queue gate and execution slot count you want in [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml) (current defaults: one control tower, one execution slot, queue label `Ready`).
 4. If you want Jira comments, set `HARNESS_JIRA_BASE_URL`, `HARNESS_JIRA_USER_EMAIL`, and `HARNESS_JIRA_API_TOKEN` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env).
 5. Add GitHub issue forms, or require all intake to flow through `scripts/task-intake`.
-6. Decide how many executor workers you want, then add the corresponding cron jobs.
+6. Decide how many executor workers you want, update `topology.execution.slot_count` plus `topology.execution.channels[]` in [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml), then add the corresponding cron jobs.
 
 ## Manager Session
 
