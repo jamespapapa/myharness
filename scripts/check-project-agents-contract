@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SOURCE_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
+
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/check-project-agents-contract <path-to-AGENTS.md>
+  scripts/check-project-agents-contract --self-test
+
+Checks that a project AGENTS.md includes the required sections, ownership contract language,
+and a document map that covers architecture, schema, runbook, integration, and release families.
+EOF
+}
+
+validate_project_agents() {
+  local file="$1"
+  local errors
+
+  if [[ ! -f "$file" ]]; then
+    printf 'error: file not found: %s\n' "$file" >&2
+    return 1
+  fi
+
+  errors=$(
+    awk '
+      function trim(text) {
+        sub(/^[[:space:]]+/, "", text)
+        sub(/[[:space:]]+$/, "", text)
+        return text
+      }
+
+      BEGIN {
+        required_sections[1] = "Purpose"
+        required_sections[2] = "Long-Lived Constraints"
+        required_sections[3] = "Harness Ownership Contract"
+        required_sections[4] = "Document Map"
+
+        family_labels[1] = "Architecture"
+        family_needles[1] = "architecture"
+        family_labels[2] = "Schemas"
+        family_needles[2] = "schema"
+        family_labels[3] = "Runbooks"
+        family_needles[3] = "runbook|operations"
+        family_labels[4] = "Integrations"
+        family_needles[4] = "integration"
+        family_labels[5] = "Release"
+        family_needles[5] = "release"
+      }
+
+      /^##[[:space:]]+/ {
+        current = $0
+        sub(/^##[[:space:]]+/, "", current)
+        if (section_seen[current] == 1) {
+          printf "duplicate section: %s\n", current
+        }
+        section_seen[current] = 1
+        next
+      }
+
+      {
+        if (current != "") {
+          sections[current] = sections[current] $0 "\n"
+        }
+      }
+
+      END {
+        for (i = 1; i <= 4; i++) {
+          section = required_sections[i]
+          if (section_seen[section] != 1) {
+            printf "missing section: %s\n", section
+            continue
+          }
+          if (trim(sections[section]) == "") {
+            printf "empty section: %s\n", section
+          }
+        }
+
+        harness_contract = tolower(sections["Harness Ownership Contract"])
+        if (section_seen["Harness Ownership Contract"] == 1) {
+          if (index(harness_contract, "sync-owned") == 0) {
+            print "Harness Ownership Contract must mention sync-owned shared paths"
+          }
+          if (index(harness_contract, "project-owned") == 0 &&
+              index(harness_contract, "locally owned") == 0 &&
+              index(harness_contract, "local overlay") == 0 &&
+              index(harness_contract, "project overlay") == 0) {
+            print "Harness Ownership Contract must mention project-owned or local overlay paths"
+          }
+        }
+
+        document_map = sections["Document Map"]
+        line_count = split(document_map, lines, "\n")
+        for (i = 1; i <= line_count; i++) {
+          line = lines[i]
+          if (line !~ /^[[:space:]]*-[[:space:]]*[^:]+:[[:space:]]*.+$/) {
+            continue
+          }
+
+          sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+          separator = index(line, ":")
+          key = trim(substr(line, 1, separator - 1))
+          value = trim(substr(line, separator + 1))
+          key_lower = tolower(key)
+
+          if (value == "") {
+            printf "document map entry has empty value: %s\n", key
+          }
+          if (doc_map_seen[key_lower] == 1) {
+            printf "duplicate document map category: %s\n", key
+          }
+
+          doc_map_seen[key_lower] = 1
+          for (family_index = 1; family_index <= 5; family_index++) {
+            if (key_lower ~ family_needles[family_index]) {
+              family_found[family_index] = 1
+            }
+          }
+        }
+
+        if (section_seen["Document Map"] == 1) {
+          for (family_index = 1; family_index <= 5; family_index++) {
+            if (family_found[family_index] != 1) {
+              printf "document map missing category family: %s\n", family_labels[family_index]
+            }
+          }
+        }
+      }
+    ' "$file"
+  )
+
+  if [[ -n "$errors" ]]; then
+    printf 'project AGENTS contract failed: %s\n' "$file" >&2
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      printf '  - %s\n' "$line" >&2
+    done <<<"$errors"
+    return 1
+  fi
+
+  printf 'project AGENTS contract passed: %s\n' "$file"
+}
+
+run_self_test() {
+  local tmp_dir valid_file invalid_file template_file
+
+  tmp_dir=$(mktemp -d)
+  valid_file="$tmp_dir/valid-AGENTS.md"
+  invalid_file="$tmp_dir/invalid-AGENTS.md"
+  template_file="$SOURCE_ROOT/.harness/templates/project/AGENTS.md"
+
+  cat >"$valid_file" <<'EOF'
+# AGENTS.md
+
+## Purpose
+- Keep the repo focused on the product mission.
+
+## Long-Lived Constraints
+- Preserve the API compatibility contract.
+
+## Harness Ownership Contract
+- Shared harness-core paths are sync-owned.
+- Project overlay paths are project-owned and may carry repo-local wiring.
+
+## Document Map
+- Architecture overview: docs/architecture/overview.md
+- API schema: docs/schemas/api.md
+- Operations runbook: docs/runbooks/ops.md
+- External integrations: docs/integrations/payments.md
+- Release process: N/A (not yet)
+EOF
+
+  cat >"$invalid_file" <<'EOF'
+# AGENTS.md
+
+## Purpose
+- Missing most of the contract.
+
+## Document Map
+- Architecture overview: docs/architecture/overview.md
+EOF
+
+  validate_project_agents "$template_file" >/dev/null
+  validate_project_agents "$valid_file" >/dev/null
+
+  if validate_project_agents "$invalid_file" >/dev/null 2>&1; then
+    printf 'error: invalid AGENTS fixture unexpectedly passed\n' >&2
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  rm -rf "$tmp_dir"
+  printf 'check-project-agents-contract passed\n'
+}
+
+case "${1:-}" in
+  --self-test)
+    run_self_test
+    ;;
+  -h|--help)
+    usage
+    ;;
+  "")
+    usage >&2
+    exit 1
+    ;;
+  *)
+    validate_project_agents "$1"
+    ;;
+esac

@@ -15,9 +15,9 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -h|--help)
-      cat <<'EOF'
+      cat <<'EOH'
 usage: scripts/check-harness [--skip-doc-coverage]
-EOF
+EOH
       exit 0
       ;;
     *)
@@ -34,6 +34,7 @@ scripts=(
   scripts/check-project-manifest
   scripts/check-manager-workspace
   scripts/check-sync-request
+  scripts/check-project-agents-contract
   scripts/check-control-room-notifications
   scripts/check-review-outcomes
   scripts/check-stage-reporting
@@ -64,6 +65,7 @@ scripts/check-doc-coverage --self-test
 scripts/check-project-manifest
 scripts/check-manager-workspace
 scripts/check-sync-request
+scripts/check-project-agents-contract --self-test
 scripts/check-control-room-notifications
 scripts/check-review-outcomes
 scripts/check-stage-reporting
