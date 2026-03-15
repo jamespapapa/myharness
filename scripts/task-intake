@@ -94,7 +94,7 @@ harness_can_sync_github || harness_die "GitHub sync is unavailable; check gh aut
 repo_slug=$(harness_repo_slug)
 
 create_args=(issue create -R "$repo_slug" --title "$title" --body "$body")
-for label in "${labels[@]}"; do
+for label in "${labels[@]-}"; do
   create_args+=(--label "$label")
 done
 

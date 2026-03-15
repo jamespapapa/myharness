@@ -64,13 +64,31 @@
       ]
     },
     {
+      "id": "sync",
+      "description": "Harness sync request flow or sync-owned request metadata changed.",
+      "change_patterns": [
+        "^\\.harness/sync-request\\.defaults\\.json$",
+        "^scripts/(task-sync-request|check-sync-request|openclaw-manager-setup)$"
+      ],
+      "doc_patterns": [
+        "^ops/HARNESS_SYNC\\.md$",
+        "^ops/HARNESS_ADMIN\\.md$",
+        "^\\.harness/profiles/openclaw-manager/AGENTS\\.md$"
+      ],
+      "doc_targets": [
+        "ops/HARNESS_SYNC.md",
+        "ops/HARNESS_ADMIN.md",
+        ".harness/profiles/openclaw-manager/AGENTS.md"
+      ]
+    },
+    {
       "id": "ops",
       "description": "Operator policy, runtime profiles, or executable verification gates changed.",
       "change_patterns": [
         "^\\.harness/doc-coverage\\.rules\\.json$",
         "^\\.harness/prepare\\.commands$",
         "^\\.harness/profiles/[^/]+/AGENTS\\.md$",
-        "^scripts/(check-doc-coverage|check-harness|check-manager-workspace|check-project-manifest|check-task-control-room-once|check-task-run-once)$"
+        "^scripts/(check-doc-coverage|check-harness|check-manager-workspace|check-project-manifest|check-task-control-room-once|check-task-run-once|task-intake|task-sync-request)$"
       ],
       "doc_patterns": [
         "^AGENTS\\.md$",

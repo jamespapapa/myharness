@@ -53,10 +53,34 @@ Desired operator flow:
 
 1. harness-core changes land,
 2. operator says: `harness core updated; sync this project`,
-3. control-tower creates a sync issue,
+3. `scripts/task-sync-request --source-ref "<core-ref>"` creates a structured sync issue,
 4. the harness processes that sync issue like ordinary work,
 5. a sync PR lands in the project repo,
 6. the project runner updates to the new synced core.
+
+This repo now stores the default sync request metadata in `.harness/sync-request.defaults.json`.
+`scripts/task-sync-request` reads that tracked file to populate:
+
+- expected shared-path updates,
+- likely overlay conflict points,
+- default verification requirements.
+
+Explicit operator flags override those defaults for a specific request:
+
+- `--shared-path <path>`
+- `--overlay-conflict <path>`
+- `--verify <requirement>`
+- `--migration-note <note>`
+
+If the request should enter the normal queue immediately, the command adds the repo's default queue label automatically.
+If the operator wants to claim it right away, use `--start` and the harness will create the issue and hand it to the normal `task-start` path.
+
+Example:
+
+```bash
+scripts/task-sync-request --source-ref harness-core@abc1234
+scripts/task-sync-request --source-ref harness-core@abc1234 --start
+```
 
 ## Sync Issue Requirements
 
@@ -68,6 +92,8 @@ A sync issue should record:
 - likely overlay conflict points,
 - required verification steps,
 - doc updates or migration notes when needed.
+
+`scripts/task-sync-request` creates that shape as an ordinary issue body so the resulting work item can move through the same claim, review, prepare, and land flow as any other task.
 
 ## Prepare / Check Expectations
 

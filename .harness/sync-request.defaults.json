@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "shared_paths": [
+    "scripts/",
+    ".harness/profiles/",
+    "ops/"
+  ],
+  "overlay_conflict_points": [
+    ".harness/project.yaml",
+    ".harness/project.env",
+    ".harness/prepare.commands",
+    "AGENTS.md",
+    "docs/**"
+  ],
+  "verification_requirements": [
+    "Run `scripts/check-harness`.",
+    "Run any project-specific prepare commands that cover changed runtime behavior.",
+    "Confirm project-owned overlay paths keep repo-specific settings after the sync."
+  ]
+}

@@ -36,6 +36,8 @@ openclaw
 Primary commands:
 
 - create issue: \`${scripts_rel}/task-intake --title "<title>" --body "<body>"\`
+- request harness sync: \`${scripts_rel}/task-sync-request --source-ref "<core-ref>"\`
+- request harness sync and start: \`${scripts_rel}/task-sync-request --source-ref "<core-ref>" --start\`
 - create and start: \`${scripts_rel}/task-intake --title "<title>" --body "<body>" --start\`
 - next issue: \`${scripts_rel}/task-next\`
 - repo wake tick: \`${scripts_rel}/task-control-room-once\`
