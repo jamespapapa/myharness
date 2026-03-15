@@ -2,6 +2,11 @@
 
 This document defines what a project repository's `AGENTS.md` should contain when the project runs on top of harness-core.
 
+Reusable support in this repo:
+
+- Template: `.harness/templates/project/AGENTS.md`
+- Validator: `scripts/check-project-agents-contract path/to/AGENTS.md`
+
 ## Purpose
 
 `AGENTS.md` should give workers and operators the **stable map** of the project, not act as a dumping ground for every detail.
@@ -33,7 +38,7 @@ Only constraints that are expected to remain stable for a while, such as:
 - release branch expectations,
 - integration constraints.
 
-### 3. Harness Contract
+### 3. Harness Ownership Contract
 
 The project's AGENTS should explicitly say that:
 
@@ -53,6 +58,12 @@ AGENTS should link to the documents that hold important detail, for example:
 - external integration references,
 - release process,
 - incident / recovery notes.
+
+The map should stay category-based instead of path-rigid:
+
+- use whatever repo-local paths fit the project,
+- keep one or more entries for architecture, schemas, runbooks, integrations, and release guidance,
+- if a category does not exist yet, map it to `N/A (not yet)` instead of dropping it from the file.
 
 ## What AGENTS.md Should Not Contain
 
@@ -78,6 +89,14 @@ For serious projects, the repo should eventually maintain at least these categor
 
 Exact paths may vary, but the categories should be represented.
 
+Recommended homes for detailed docs:
+
+- architecture details: `docs/architecture/*`
+- schemas and contracts: `docs/schemas/*`
+- operations and operator procedures: `docs/runbooks/*`
+- external systems and dependencies: `docs/integrations/*`
+- release process and rollout notes: `docs/release/*`
+
 ## Documentation Gate Direction
 
 When a task changes any of the following, documentation should be part of done:
@@ -102,6 +121,12 @@ The rule stays scope-aware on purpose:
 
 If a new critical doc appears under `ops/` or the major `docs/` categories, `AGENTS.md` must reference that path before the gate passes.
 
+Projects should treat this as a maintenance rule:
+
+- keep `AGENTS.md` short,
+- move detail into the mapped docs,
+- run `scripts/check-project-agents-contract` in local checks or CI to keep the contract live.
+
 ## Minimal Example Shape
 
 ```markdown
@@ -113,18 +138,23 @@ If a new critical doc appears under `ops/` or the major `docs/` categories, `AGE
 ## Long-Lived Constraints
 ...
 
-## Harness Contract
+## Harness Ownership Contract
 - shared harness-core paths are sync-owned
 - project overlay paths are locally owned
 
 ## Document Map
 - Architecture overview: docs/architecture/overview.md
-- Domain model: docs/architecture/domain-model.md
 - API schema: docs/schemas/api.md
-- DB schema: docs/schemas/db.md
 - Ops runbook: docs/runbooks/ops.md
-- Integrations: docs/integrations/*.md
+- External integrations: docs/integrations/index.md
+- Release process: docs/release/process.md
 ```
+
+The validator checks:
+
+- required `Purpose`, `Long-Lived Constraints`, `Harness Ownership Contract`, and `Document Map` sections,
+- ownership language for sync-owned and project-owned paths,
+- document-map coverage for architecture, schema, runbook, integration, and release categories.
 
 ## Success Criteria
 
