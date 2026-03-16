@@ -398,6 +398,8 @@ issue_9002_labels=$(issue_labels 9002)
 assert_contains "$issue_9002_labels" "harness:in-dev-batch" "issue 9002 should also be tagged as part of the active dev batch"
 
 issue_9001_comments=$(issue_comments 9001)
+assert_contains "$issue_9001_comments" "Harness stage update: land merged." "issue 9001 comments should include the land merged stage update"
+assert_contains "$issue_9001_comments" "Land merged the task PR." "issue 9001 land-merged comment should include the merge result"
 assert_contains "$issue_9001_comments" '"event":"dev_batch_joined"' "issue 9001 comments should include the dev-batch event payload"
 assert_contains "$issue_9001_comments" "\"batch_id\":\"$active_batch_id\"" "issue 9001 dev-batch comment should record the batch id"
 
