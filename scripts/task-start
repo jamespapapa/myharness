@@ -169,6 +169,7 @@ printf 'OpenClaw task command:\n'
 printf '  cd %q && openclaw\n' "$openclaw_session"
 
 if [[ "$launch" == "codex" ]]; then
+  harness_update_claim_status "$claim_key" "in_progress" "task-start launched Codex directly"
   harness_notice "launching Codex in $codex_session"
   finish_script="$(harness_repo_root)/scripts/task-finish"
   gh_token="$(gh auth token 2>/dev/null || true)"
