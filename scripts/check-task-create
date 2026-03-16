@@ -109,10 +109,15 @@ base_branch=$(jq -r '.base_branch' "$task_file")
 base_remote_ref=$(jq -r '.base_remote_ref' "$task_file")
 branch=$(jq -r '.branch' "$task_file")
 worktree=$(jq -r '.worktree' "$task_file")
+codex_agents="$worktree/.harness-session/codex/AGENTS.md"
+codex_task="$worktree/.harness-session/codex/TASK.md"
 
 assert_eq "$base_branch" "dev" "task-create should default issue work to the integration branch"
 assert_eq "$base_remote_ref" "origin/dev" "task-create should record origin/dev as the remote base ref"
 assert_eq "$branch" "fix/issue-42" "issue tasks should keep the issue branch naming convention"
 [[ -d "$worktree" ]] || { printf 'expected worktree to exist: %s\n' "$worktree" >&2; exit 1; }
+grep -Fq '## Required Base Sync Before Handoff' "$codex_agents" || { printf 'expected codex AGENTS to highlight base sync handoff rules\n' >&2; exit 1; }
+grep -Fq 'fetch `origin/dev` and confirm your branch contains that exact remote base head' "$codex_task" || { printf 'expected generated TASK.md to require syncing the latest remote base before handoff\n' >&2; exit 1; }
+grep -Fq 'base branch sync failed:' "$codex_task" || { printf 'expected generated TASK.md to require an explicit blocker when base sync cannot be completed\n' >&2; exit 1; }
 
 printf 'check-task-create passed\n'

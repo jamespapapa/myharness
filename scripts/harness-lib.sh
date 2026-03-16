@@ -167,9 +167,6 @@ harness_load_project_env() {
   : "${HARNESS_REQUIRE_GREEN_CHECKS:=0}"
   : "${HARNESS_CONTROL_ROOM_DISCORD_WEBHOOK_URL:=}"
   : "${HARNESS_CONTROL_TOWER_CHANNEL_KEY:=$manifest_control_tower_key}"
-  : "${HARNESS_JIRA_BASE_URL:=}"
-  : "${HARNESS_JIRA_USER_EMAIL:=}"
-  : "${HARNESS_JIRA_API_TOKEN:=}"
   : "${HARNESS_LABEL_ACTIVE:=harness:in-progress}"
   : "${HARNESS_LABEL_PR_OPEN:=harness:pr-open}"
   : "${HARNESS_LABEL_DONE:=harness:done}"
@@ -1251,46 +1248,6 @@ harness_run_prepare_commands() {
   done <"$commands_file"
 }
 
-harness_extract_jira_issue_key_from_text() {
-  local text line key
-  text="${1:-}"
-  [[ -n "$text" ]] || return 1
-
-  line=$(printf '%s\n' "$text" | grep -im1 -E '^[[:space:]>*-]*jira([[:space:]]+issue)?[[:space:]]*:' || true)
-  if [[ -n "$line" ]]; then
-    key=$(printf '%s\n' "$line" | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | head -n 1 || true)
-    if [[ -n "$key" ]]; then
-      printf '%s\n' "$key"
-      return 0
-    fi
-  fi
-
-  key=$(printf '%s\n' "$text" \
-    | grep -oE 'https?://[^[:space:]]+/browse/[A-Z][A-Z0-9]+-[0-9]+' \
-    | sed -E 's#.*/browse/([A-Z][A-Z0-9]+-[0-9]+)$#\1#' \
-    | head -n 1 || true)
-  [[ -n "$key" ]] || return 1
-  printf '%s\n' "$key"
-}
-
-harness_jira_issue_url() {
-  local issue_key base_url
-  issue_key="${1:-}"
-
-  harness_load_project_env
-  base_url="${HARNESS_JIRA_BASE_URL%/}"
-  [[ -n "$issue_key" && -n "$base_url" ]] || return 1
-  printf '%s/browse/%s\n' "$base_url" "$issue_key"
-}
-
-harness_can_sync_jira() {
-  harness_load_project_env
-  command -v curl >/dev/null 2>&1 || return 1
-  [[ -n "${HARNESS_JIRA_BASE_URL:-}" ]] || return 1
-  [[ -n "${HARNESS_JIRA_USER_EMAIL:-}" ]] || return 1
-  [[ -n "${HARNESS_JIRA_API_TOKEN:-}" ]] || return 1
-}
-
 harness_stage_status_id() {
   local stage event
   stage="${1:-}"
@@ -1305,12 +1262,15 @@ harness_stage_status_id() {
     review:rework) printf 'review_rework\n' ;;
     review:rejected) printf 'review_rejected\n' ;;
     review:blocked) printf 'review_blocked\n' ;;
+    review:stale) printf 'review_stale\n' ;;
     prepare:passed) printf 'prepare_passed\n' ;;
     prepare:failed) printf 'prepare_failed\n' ;;
     prepare:blocked) printf 'prepare_blocked\n' ;;
+    prepare:stale) printf 'prepare_stale\n' ;;
     land:merged) printf 'land_merged\n' ;;
     land:failed) printf 'land_failed\n' ;;
     land:blocked) printf 'land_blocked\n' ;;
+    land:deferred) printf 'land_deferred\n' ;;
     *)
       harness_die "unsupported stage summary event: $stage/$event"
       ;;
@@ -1330,12 +1290,15 @@ harness_stage_label() {
     review_rework) printf 'review rework\n' ;;
     review_rejected) printf 'review rejected\n' ;;
     review_blocked) printf 'review blocked\n' ;;
+    review_stale) printf 'review stale\n' ;;
     prepare_passed) printf 'prepare passed\n' ;;
     prepare_failed) printf 'prepare failed\n' ;;
     prepare_blocked) printf 'prepare blocked\n' ;;
+    prepare_stale) printf 'prepare stale\n' ;;
     land_merged) printf 'land merged\n' ;;
     land_failed) printf 'land failed\n' ;;
     land_blocked) printf 'land blocked\n' ;;
+    land_deferred) printf 'land deferred\n' ;;
     *)
       harness_die "unsupported stage label: $stage_id"
       ;;
@@ -1351,7 +1314,7 @@ harness_stage_operator_action() {
       printf 'Inspect the worker outcome, then rerun or requeue the task.'
       ;;
     review_rework)
-      printf ''
+      printf 'Executor should repair the same PR branch, rerun verification, and hand back the updated head.'
       ;;
     review_rejected)
       printf 'Inspect the review findings, then revise the PR or close the task.'
@@ -1359,11 +1322,20 @@ harness_stage_operator_action() {
     review_blocked)
       printf 'Inspect the review run, then rerun review or fix the PR.'
       ;;
+    review_stale)
+      printf 'Rerun review on the latest PR head after the branch settles.'
+      ;;
     prepare_failed|prepare_blocked)
       printf 'Fix the failing verification gate or blocker, then rerun prepare.'
       ;;
+    prepare_stale)
+      printf 'Rerun review and prepare on the latest PR head before landing.'
+      ;;
     land_failed|land_blocked)
       printf 'Resolve the merge or checks blocker, then rerun land.'
+      ;;
+    land_deferred)
+      printf 'Refresh review and prepare artifacts on the current PR head, then rerun land.'
       ;;
     *)
       printf ''
@@ -1371,50 +1343,18 @@ harness_stage_operator_action() {
   esac
 }
 
-harness_jira_comment() {
-  local issue_key body payload auth_header base_url
-  issue_key="$1"
-  body="$2"
+harness_issue_stage_comment() {
+  local repo issue_number stage_label happened pr_url blocked_reason next_action comment_body
+  repo="$1"
+  issue_number="$2"
+  stage_label="$3"
+  happened="${4:-}"
+  pr_url="${5:-}"
+  blocked_reason="${6:-}"
+  next_action="${7:-}"
 
-  harness_can_sync_jira || return 1
-  [[ -n "$issue_key" ]] || return 1
-
-  payload=$(jq -nc --arg body "$body" '{body:$body}')
-  auth_header=$(printf '%s:%s' "$HARNESS_JIRA_USER_EMAIL" "$HARNESS_JIRA_API_TOKEN" | base64 | tr -d '\n')
-  base_url="${HARNESS_JIRA_BASE_URL%/}"
-
-  curl -fsS \
-    -H "Authorization: Basic $auth_header" \
-    -H "Accept: application/json" \
-    -H "Content-Type: application/json" \
-    -X POST \
-    -d "$payload" \
-    "$base_url/rest/api/2/issue/$issue_key/comment" >/dev/null
-}
-
-harness_sync_jira_stage_summary() {
-  local task_id stage_id happened pr_url blocked_reason next_action task_json jira_issue_key issue_number repo_slug issue_reference comment_body issue_body
-  task_id="$1"
-  stage_id="$2"
-  happened="${3:-}"
-  pr_url="${4:-}"
-  blocked_reason="${5:-}"
-  next_action="${6:-}"
-
-  harness_can_sync_jira || return 0
-  harness_task_exists "$task_id" || return 0
-
-  task_json=$(harness_task_json "$task_id")
-  jira_issue_key=$(printf '%s' "$task_json" | jq -r '.jira_issue_key // ""')
-  if [[ -z "$jira_issue_key" ]]; then
-    issue_body=$(printf '%s' "$task_json" | jq -r '.issue_body // ""')
-    jira_issue_key=$(harness_extract_jira_issue_key_from_text "$issue_body" 2>/dev/null || true)
-  fi
-  [[ -n "$jira_issue_key" ]] || return 0
-
-  issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
-  repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
-  issue_reference=$(harness_control_room_reference "$task_id" "$issue_number" "$repo_slug")
+  harness_can_sync_github || return 0
+  [[ -n "$repo" && -n "$issue_number" ]] || return 0
 
   happened=$(harness_truncate_text "$happened" 320)
   blocked_reason=$(harness_truncate_text "$blocked_reason" 220)
@@ -1422,23 +1362,36 @@ harness_sync_jira_stage_summary() {
 
   comment_body=$(
     cat <<EOF
-Harness stage update
+Harness stage update: $stage_label.
 
-- task: \`$task_id\`
-- issue: \`$issue_reference\`
-- stage: \`$(harness_stage_label "$stage_id")\`
-- happened: $happened
-$(if [[ -n "$pr_url" ]]; then printf -- '- pr: %s\n' "$pr_url"; fi)$(if [[ -n "$blocked_reason" ]]; then printf -- '- blocked_reason: %s\n' "$blocked_reason"; fi)$(if [[ -n "$next_action" ]]; then printf -- '- operator_action: %s\n' "$next_action"; fi)
+- result: $happened
+$(if [[ -n "$pr_url" ]]; then printf -- '- pr: %s\n' "$pr_url"; fi)$(if [[ -n "$blocked_reason" ]]; then printf -- '- reason: %s\n' "$blocked_reason"; fi)$(if [[ -n "$next_action" ]]; then printf -- '- next: %s\n' "$next_action"; fi)
 EOF
   )
 
-  if ! harness_jira_comment "$jira_issue_key" "$comment_body"; then
-    harness_notice "jira comment sync failed for $jira_issue_key ($stage_id)"
-  fi
+  harness_issue_comment "$repo" "$issue_number" "$comment_body"
+}
+
+harness_sync_github_stage_summary() {
+  local task_id stage_id happened pr_url blocked_reason next_action task_json issue_number repo_slug
+  task_id="$1"
+  stage_id="$2"
+  happened="${3:-}"
+  pr_url="${4:-}"
+  blocked_reason="${5:-}"
+  next_action="${6:-}"
+
+  harness_task_exists "$task_id" || return 0
+
+  task_json=$(harness_task_json "$task_id")
+  issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
+  repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
+  harness_issue_stage_comment "$repo_slug" "$issue_number" "$(harness_stage_label "$stage_id")" "$happened" "$pr_url" "$blocked_reason" "$next_action" \
+    || harness_notice "github issue comment sync failed for $task_id ($stage_id)"
 }
 
 harness_record_stage_summary() {
-  local task_id stage event happened pr_url blocked_reason next_action stage_id task_json status_file summary_json now had_lock issue_number repo_slug issue_reference jira_issue_key issue_body
+  local task_id stage event happened pr_url blocked_reason next_action stage_id task_json status_file summary_json now had_lock issue_number repo_slug issue_reference
   task_id="$1"
   stage="$2"
   event="$3"
@@ -1469,11 +1422,6 @@ harness_record_stage_summary() {
   task_json=$(cat "$status_file")
   issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
   repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
-  jira_issue_key=$(printf '%s' "$task_json" | jq -r '.jira_issue_key // ""')
-  if [[ -z "$jira_issue_key" ]]; then
-    issue_body=$(printf '%s' "$task_json" | jq -r '.issue_body // ""')
-    jira_issue_key=$(harness_extract_jira_issue_key_from_text "$issue_body" 2>/dev/null || true)
-  fi
   issue_reference=$(harness_control_room_reference "$task_id" "$issue_number" "$repo_slug")
   now=$(harness_now_utc)
 
@@ -1485,7 +1433,6 @@ harness_record_stage_summary() {
     --arg task_id "$task_id" \
     --arg issue_reference "$issue_reference" \
     --arg repo_slug "$repo_slug" \
-    --arg jira_issue_key "$jira_issue_key" \
     --arg pr_url "$pr_url" \
     --arg happened "$happened" \
     --arg blocked_reason "$blocked_reason" \
@@ -1500,7 +1447,6 @@ harness_record_stage_summary() {
       issue_number: $issue_number,
       repo_slug: $repo_slug,
       issue_reference: $issue_reference,
-      jira_issue_key: $jira_issue_key,
       pr_url: $pr_url,
       happened: $happened,
       blocked_reason: $blocked_reason,
@@ -1520,7 +1466,7 @@ harness_record_stage_summary() {
     harness_release_lock
   fi
 
-  harness_sync_jira_stage_summary "$task_id" "$stage_id" "$happened" "$pr_url" "$blocked_reason" "$next_action"
+  harness_sync_github_stage_summary "$task_id" "$stage_id" "$happened" "$pr_url" "$blocked_reason" "$next_action"
 }
 
 harness_status_check_summary() {
@@ -1805,9 +1751,6 @@ harness_issue_started() {
   if [[ -n "$login" ]]; then
     gh issue edit "$issue_number" -R "$repo" --add-assignee "$login" >/dev/null 2>&1 || true
   fi
-
-  harness_issue_comment "$repo" "$issue_number" \
-    "Harness claim started.\n\n- task: \`$task_id\`\n- branch: \`$branch\`\n- worktree: \`$worktree\`"
 }
 
 harness_issue_pr_open() {
@@ -1822,9 +1765,6 @@ harness_issue_pr_open() {
     --remove-label "$HARNESS_LABEL_ACTIVE" \
     --remove-label "$HARNESS_LABEL_BLOCKED" \
     --add-label "$HARNESS_LABEL_PR_OPEN" >/dev/null 2>&1 || true
-
-  harness_issue_comment "$repo" "$issue_number" \
-    "Harness status update: PR opened.\n\n- pr: $pr_url"
 }
 
 harness_issue_blocked() {
@@ -1839,9 +1779,6 @@ harness_issue_blocked() {
     --remove-label "$HARNESS_LABEL_ACTIVE" \
     --remove-label "$HARNESS_LABEL_PR_OPEN" \
     --add-label "$HARNESS_LABEL_BLOCKED" >/dev/null 2>&1 || true
-
-  harness_issue_comment "$repo" "$issue_number" \
-    "Harness status update: blocked.\n\n- reason: $reason"
 }
 
 harness_issue_rejected() {
@@ -1856,9 +1793,6 @@ harness_issue_rejected() {
     --remove-label "$HARNESS_LABEL_ACTIVE" \
     --remove-label "$HARNESS_LABEL_BLOCKED" \
     --add-label "$HARNESS_LABEL_PR_OPEN" >/dev/null 2>&1 || true
-
-  harness_issue_comment "$repo" "$issue_number" \
-    "Harness status update: rejected.\n\n- reason: $reason"
 }
 
 harness_issue_done() {
@@ -1874,13 +1808,6 @@ harness_issue_done() {
     --remove-label "$HARNESS_LABEL_PR_OPEN" \
     --remove-label "$HARNESS_LABEL_BLOCKED" \
     --add-label "$HARNESS_LABEL_DONE" >/dev/null 2>&1 || true
-
-  if [[ -n "$pr_url" ]]; then
-    harness_issue_comment "$repo" "$issue_number" \
-      "Harness status update: merged.\n\n- pr: $pr_url"
-  else
-    harness_issue_comment "$repo" "$issue_number" "Harness status update: merged."
-  fi
 }
 
 harness_issue_unclaim() {
@@ -1910,6 +1837,35 @@ harness_ensure_base_branch() {
   git -C "$root" fetch origin "$base" >/dev/null
   git -C "$root" show-ref --verify --quiet "$remote_ref" \
     || harness_die "remote base branch not found after fetch: origin/$base"
+}
+
+harness_task_base_sync_reason() {
+  local task_id task_json worktree branch base_branch base_remote_ref remote_base_sha
+  task_id="$1"
+
+  harness_task_exists "$task_id" || return 1
+  task_json=$(harness_task_json "$task_id")
+  worktree=$(printf '%s' "$task_json" | jq -r '.worktree // ""')
+  branch=$(printf '%s' "$task_json" | jq -r '.branch // ""')
+  base_branch=$(printf '%s' "$task_json" | jq -r '.base_branch // ""')
+  base_remote_ref=$(printf '%s' "$task_json" | jq -r '.base_remote_ref // ""')
+
+  [[ -n "$worktree" && -n "$base_branch" ]] || return 1
+  if [[ -z "$base_remote_ref" ]]; then
+    base_remote_ref=$(harness_remote_branch_ref "$base_branch")
+  fi
+
+  harness_ensure_base_branch "$base_branch"
+  remote_base_sha=$(git -C "$worktree" rev-parse "$base_remote_ref" 2>/dev/null || true)
+  [[ -n "$remote_base_sha" ]] || return 1
+
+  if git -C "$worktree" merge-base --is-ancestor "$remote_base_sha" HEAD >/dev/null 2>&1; then
+    return 0
+  fi
+
+  printf 'base branch sync required: %s is missing latest %s (%s); merge %s into %s, rerun verification, and only then hand off the task.\n' \
+    "$branch" "$base_remote_ref" "$remote_base_sha" "$base_remote_ref" "$branch"
+  return 1
 }
 
 harness_fetch_issue_json() {
