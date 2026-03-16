@@ -221,6 +221,17 @@ classify_active_task() {
   fi
 
   if [[ "$claim_status" == "assigned" ]]; then
+    if [[ "$HARNESS_CLAIM_TTL_MINUTES" =~ ^[0-9]+$ ]] \
+      && [[ "$HARNESS_CLAIM_TTL_MINUTES" -gt 0 ]] \
+      && [[ "$claimed_epoch" =~ ^[0-9]+$ ]] \
+      && [[ "$claimed_epoch" -gt 0 ]]; then
+      now_epoch=$(date -u +%s)
+      age=$((now_epoch - claimed_epoch))
+      if (( age >= HARNESS_CLAIM_TTL_MINUTES * 60 )); then
+        printf 'reconciling\n'
+        return 0
+      fi
+    fi
     printf 'assigned\n'
     return 0
   fi
@@ -311,7 +322,7 @@ collect_changed_files() {
 reconcile_task() {
   local task_json="$1"
   local issue_number task_id title worktree branch base_branch base_remote_ref base_sha repo_slug claim_key worker_log
-  local task_json_path status pr_url note ahead_count recovery_reason sync_reason
+  local task_json_path status pr_url note ahead_count recovery_reason sync_reason claim_status assignment_slot assignment_channel
   local -a changed_files
 
   issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
@@ -325,6 +336,9 @@ reconcile_task() {
   repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
   claim_key=$(printf '%s' "$task_json" | jq -r '.claim_key // ""')
   worker_log=$(printf '%s' "$task_json" | jq -r '.worker_log // ""')
+  claim_status=$(printf '%s' "$task_json" | jq -r '.claim_status // ""')
+  assignment_slot=$(printf '%s' "$task_json" | jq -r '.assignment.slot // ""')
+  assignment_channel=$(printf '%s' "$task_json" | jq -r '.assignment.channel // ""')
   task_json_path=$(harness_task_status_path "$task_id")
 
   if [[ -n "$claim_key" ]]; then
@@ -384,6 +398,8 @@ reconcile_task() {
             fi
           elif [[ -n "$pr_url" ]]; then
             "$SCRIPT_DIR/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null 2>&1 || true
+          elif [[ ( -z "$claim_status" || "$claim_status" == "assigned" ) && -n "$assignment_slot" && -n "$assignment_channel" ]]; then
+            "$SCRIPT_DIR/task-finish" --issue "$issue_number" --unclaim >/dev/null 2>&1 || true
           else
             recovery_reason="executor reconcile found no commits, PR, or explicit task-finish; log=${worker_log:-unknown}"
             "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
@@ -409,6 +425,11 @@ reconcile_task() {
     done)
       emit_log "success" "reconciled active task to done" "$issue_number" "$task_id" "${pr_url:-$note}"
       printf 'success: reconciled issue #%s -> done\n' "$issue_number"
+      return 0
+      ;;
+    created)
+      emit_log "success" "requeued stale assigned task" "$issue_number" "$task_id" "$note"
+      printf 'success: requeued issue #%s for reassignment\n' "$issue_number"
       return 0
       ;;
     blocked)

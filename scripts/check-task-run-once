@@ -628,11 +628,11 @@ scenario_dispatch_only_rework_stays_assigned() {
   assert_contains "$note" "assigned to exec-r/slot-r" "dispatch-only rework note should mention the assignment target"
 }
 
-scenario_assigned_claim_survives_ttl() {
-  local run_output stale_iso stale_epoch
+scenario_assigned_claim_expires_to_requeue() {
+  local run_output stale_iso stale_epoch task_status claim_count
 
   setup_fixture "assigned-ttl"
-  write_mock_issue 9014 "Assigned claim survives ttl" '[{"name":"Ready"}]'
+  write_mock_issue 9014 "Assigned claim expires to requeue" '[{"name":"Ready"}]'
   write_issue_list '[]'
 
   task_env "$REPO_DIR/scripts/task-start" --issue 9014 --assign-slot slot-t --assign-channel exec-t >/dev/null
@@ -645,8 +645,18 @@ scenario_assigned_claim_survives_ttl() {
   ' "$REPO_DIR/.harness/state/claims.json" > "$REPO_DIR/.harness/state/claims.json.tmp"
   mv "$REPO_DIR/.harness/state/claims.json.tmp" "$REPO_DIR/.harness/state/claims.json"
 
-  run_output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" HARNESS_CLAIM_TTL_MINUTES="1" "$REPO_DIR/scripts/task-run-once" --assigned-only --assign-slot slot-t --assign-channel exec-t)
-  assert_eq "$run_output" "success: reconciled issue #9014 -> PR https://example.test/pr/9014" "assigned claims should survive ttl pruning until their worker consumes them"
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_CLAIM_TTL_MINUTES="1"
+EOF
+
+  run_output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once")
+  assert_eq "$run_output" "success: requeued issue #9014 for reassignment" "expired assigned claims should be requeued instead of blocking forever"
+
+  task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9014/task.json")
+  assert_eq "$task_status" "created" "expired assigned claims should return the task to created state"
+
+  claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_count" "0" "expired assigned claims should be cleared from claims.json"
 }
 
 scenario_task_start_launch_marks_claim_running() {
@@ -698,7 +708,7 @@ scenario_dispatch_only_records_assignment
 scenario_assigned_only_does_not_fetch_queue
 scenario_assigned_only_runs_preassigned_work
 scenario_dispatch_only_rework_stays_assigned
-scenario_assigned_claim_survives_ttl
+scenario_assigned_claim_expires_to_requeue
 scenario_task_start_launch_marks_claim_running
 scenario_blocks_stale_base_handoff
 

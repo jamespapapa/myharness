@@ -808,10 +808,7 @@ harness_prune_claims() {
 
   jq --argjson cutoff "$cutoff" '
     with_entries(
-      select(
-        ((.value.status // "") == "assigned")
-        or ((.value.claimed_epoch // 0) >= $cutoff)
-      )
+      select((.value.claimed_epoch // 0) >= $cutoff)
     )
   ' "$HARNESS_CLAIMS_FILE" >"$HARNESS_CLAIMS_FILE.tmp"
   mv "$HARNESS_CLAIMS_FILE.tmp" "$HARNESS_CLAIMS_FILE"
@@ -1894,7 +1891,7 @@ harness_issue_unclaim() {
   gh issue edit "$issue_number" -R "$repo" \
     --remove-label "$HARNESS_LABEL_ACTIVE" >/dev/null 2>&1 || true
 
-  harness_issue_comment "$repo" "$issue_number" "Harness claim cleared."
+  harness_issue_comment "$repo" "$issue_number" "Harness claim cleared. Result: returned the task to the queue for reassignment."
 }
 
 harness_remote_branch_ref() {
