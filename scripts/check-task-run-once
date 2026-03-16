@@ -745,6 +745,7 @@ scenario_assigned_only_runs_preassigned_work
 scenario_dispatch_only_rework_stays_assigned
 scenario_assigned_claim_expires_to_requeue
 scenario_task_start_launch_marks_claim_running
+scenario_assigned_only_waits_when_slot_busy
 scenario_blocks_stale_base_handoff
 
 printf 'check-task-run-once passed\n'
