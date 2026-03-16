@@ -49,8 +49,9 @@ What you still need before using this on a real codebase:
 
 Release tracking:
 
-- issue PRs merged to `dev` are added automatically to the active batch in `.harness/state/release-batches.json`
-- a `dev` -> `main` promotion PR merged through `scripts/task-land` closes that batch and stamps every shipped issue with release metadata
+- issue work targets `HARNESS_INTEGRATION_BRANCH` by default (`dev` in this seed), and merged issue PRs are added automatically to the active batch in `.harness/state/release-batches.json`
+- each issue merge into `dev` appends one concise unreleased entry to the root `CHANGELOG.md`
+- a `dev` -> `main` promotion PR merged through `scripts/task-land` closes that batch, archives the batch changelog under `artifacts/releases/<batch-id>.md`, stamps every shipped issue with release metadata, and resets `CHANGELOG.md` for the next batch
 - the operator inspection commands live in [ops/HARNESS_ADMIN.md](/Users/jules/Desktop/work/myharness/ops/HARNESS_ADMIN.md)
 
 Quick start:
@@ -67,7 +68,9 @@ Autonomous control-room entrypoint:
 scripts/task-control-room-once
 ```
 
-Manual per-lane entrypoints:
+That one repo-level wake is the safe default. It already resumes queued `rework` tasks before claiming new `Ready` work, so you do not need a separate retry/autotender loop for the normal flow.
+
+Manual/debug per-lane entrypoints:
 
 ```bash
 scripts/task-run-once

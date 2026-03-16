@@ -57,8 +57,8 @@ The human manager should spend time deciding scope and priority, not hand-carryi
 - `HARNESS_INTEGRATION_BRANCH` is the default source branch for new issue worktrees and the default PR target for issue work.
 - `HARNESS_RELEASE_BRANCH` stays separate for later promotion from the integration branch into release.
 - `HARNESS_BASE_BRANCH` remains a compatibility alias and resolves to the integration branch unless an operator overrides it explicitly.
-- When `task-land` merges an issue PR into `HARNESS_INTEGRATION_BRANCH`, the harness adds that issue to the active dev batch in `.harness/state/release-batches.json`.
-- When `task-land` merges a promotion PR whose head is `HARNESS_INTEGRATION_BRANCH` and base is `HARNESS_RELEASE_BRANCH`, the harness closes the active dev batch and stamps every shipped issue with release metadata.
+- When `task-land` merges an issue PR into `HARNESS_INTEGRATION_BRANCH`, the harness adds that issue to the active dev batch in `.harness/state/release-batches.json` and appends one concise unreleased line to the root `CHANGELOG.md`.
+- When `task-land` merges a promotion PR whose head is `HARNESS_INTEGRATION_BRANCH` and base is `HARNESS_RELEASE_BRANCH`, the harness closes the active dev batch, archives that batch changelog under `artifacts/releases/<batch-id>.md`, resets `CHANGELOG.md`, and stamps every shipped issue with release metadata.
 
 ## Production Checklist
 
@@ -69,7 +69,7 @@ Before you trust autonomous merge on a real repository:
 3. Confirm the queue gate and execution slot count you want in [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml) (current defaults: one control tower, one execution slot, queue label `Ready`).
 4. If you want Jira comments, set `HARNESS_JIRA_BASE_URL`, `HARNESS_JIRA_USER_EMAIL`, and `HARNESS_JIRA_API_TOKEN` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env).
 5. Add GitHub issue forms, or require all intake to flow through `scripts/task-intake`.
-6. Decide how many executor workers you want, update `topology.execution.slot_count` plus `topology.execution.channels[]` in [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml), then add the corresponding cron jobs.
+6. Start with one repo-level `scripts/task-control-room-once` wake loop. Only add more execution slots, channels, or cron jobs if you intentionally want more repo-level concurrency.
 
 ## Documentation Coverage Gate
 
@@ -273,14 +273,15 @@ Release batches are tracked locally in `.harness/state/release-batches.json`.
 That file keeps:
 
 - `active_batch_id`: the dev batch currently accumulating merged issue work
-- `batches[]`: append-only batch records with issue membership, merge window, and later release promotion metadata
+- `batches[]`: append-only batch records with issue membership, merge window, changelog paths, and later release promotion metadata
+- `active_changelog_path`: the root unreleased changelog path for the active batch (`CHANGELOG.md`)
 - `window_start` / `window_end`: the date window represented by the current or released dev train
-- `released_at`, `release_pr_url`, and `release_merge_sha`: the promotion stamp recorded when `dev` lands on `main`
+- `released_at`, `release_pr_url`, `release_merge_sha`, and `release_changelog_path`: the promotion stamp plus archived changelog path recorded when `dev` lands on `main`
 
 Issue sync behavior:
 
-- issue PR merged to `dev`: add `harness:in-dev-batch` and post a machine-readable `dev_batch_joined` comment payload
-- `dev` promoted to `main`: remove `harness:in-dev-batch`, add `harness:released`, and post a machine-readable `released_to_main` comment payload on each shipped issue
+- issue PR merged to `dev`: add `harness:in-dev-batch`, append an unreleased line to `CHANGELOG.md`, and post a machine-readable `dev_batch_joined` comment payload
+- `dev` promoted to `main`: remove `harness:in-dev-batch`, add `harness:released`, archive the batch changelog, reset `CHANGELOG.md`, and post a machine-readable `released_to_main` comment payload on each shipped issue
 
 Inspect the active batch:
 

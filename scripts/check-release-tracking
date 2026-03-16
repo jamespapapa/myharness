@@ -367,6 +367,10 @@ issue_comments() {
   jq -sr --argjson issue_number "$issue_number" 'map(select(.issue_number == $issue_number) | .body) | join("\n---\n")' "$COMMENTS_LOG"
 }
 
+read_file() {
+  cat "$1"
+}
+
 setup_fixture
 
 task_env "$REPO_DIR/scripts/task-land" --task-id issue-9001 >/dev/null
@@ -382,6 +386,9 @@ assert_eq "$active_status" "active" "dev merges should keep the batch active"
 active_issues=$(jq -r --arg batch_id "$active_batch_id" '.batches[] | select(.id == $batch_id) | [.issues[].issue_number] | sort | join(",")' "$release_file")
 assert_eq "$active_issues" "9001,9002" "the active batch should list all merged dev issues"
 
+active_changelog_path=$(jq -r --arg batch_id "$active_batch_id" '.batches[] | select(.id == $batch_id) | .active_changelog_path' "$release_file")
+assert_eq "$active_changelog_path" "CHANGELOG.md" "active batch should record the root changelog path"
+
 issue_9001_labels=$(issue_labels 9001)
 assert_contains "$issue_9001_labels" "harness:done" "issue 9001 should stay done after merging to dev"
 assert_contains "$issue_9001_labels" "harness:in-dev-batch" "issue 9001 should be tagged as part of the active dev batch"
@@ -393,6 +400,14 @@ assert_contains "$issue_9002_labels" "harness:in-dev-batch" "issue 9002 should a
 issue_9001_comments=$(issue_comments 9001)
 assert_contains "$issue_9001_comments" '"event":"dev_batch_joined"' "issue 9001 comments should include the dev-batch event payload"
 assert_contains "$issue_9001_comments" "\"batch_id\":\"$active_batch_id\"" "issue 9001 dev-batch comment should record the batch id"
+
+issue_9001_task=$(read_file "$REPO_DIR/.harness/tasks/issue-9001/task.json")
+assert_contains "$issue_9001_task" '"integration_changelog_path": "CHANGELOG.md"' "issue 9001 task should record the active changelog path"
+
+changelog_contents=$(read_file "$REPO_DIR/CHANGELOG.md")
+assert_contains "$changelog_contents" "<!-- batch:$active_batch_id -->" "CHANGELOG should be tied to the active batch id"
+assert_contains "$changelog_contents" "issue #9001" "CHANGELOG should include the first merged issue"
+assert_contains "$changelog_contents" "issue #9002" "CHANGELOG should include the second merged issue"
 
 task_env "$REPO_DIR/scripts/task-land" --task-id release-20260315 >/dev/null
 
@@ -407,6 +422,9 @@ assert_eq "$released_pr_number" "99" "promotion should record the release PR num
 released_issue_state=$(jq -r --arg batch_id "$active_batch_id" '.batches[] | select(.id == $batch_id) | [.issues[] | "\(.issue_number):\(.release_pr_number)"] | sort | join(",")' "$release_file")
 assert_eq "$released_issue_state" "9001:99,9002:99" "promotion should stamp each shipped issue with the release PR number"
 
+release_changelog_path=$(jq -r --arg batch_id "$active_batch_id" '.batches[] | select(.id == $batch_id) | .release_changelog_path' "$release_file")
+assert_eq "$release_changelog_path" "artifacts/releases/$active_batch_id.md" "promotion should record the archived changelog path"
+
 issue_9001_labels=$(issue_labels 9001)
 assert_contains "$issue_9001_labels" "harness:released" "issue 9001 should be marked released after the promotion"
 assert_not_contains "$issue_9001_labels" "harness:in-dev-batch" "issue 9001 should leave the active dev batch after the promotion"
@@ -419,7 +437,19 @@ issue_9002_comments=$(issue_comments 9002)
 assert_contains "$issue_9002_comments" '"event":"released_to_main"' "issue 9002 comments should include the released event payload"
 assert_contains "$issue_9002_comments" "\"batch_id\":\"$active_batch_id\"" "issue 9002 released comment should record the batch id"
 
+archived_changelog=$(read_file "$REPO_DIR/$release_changelog_path")
+assert_contains "$archived_changelog" "issue #9001" "archived changelog should preserve the first issue entry"
+assert_contains "$archived_changelog" "issue #9002" "archived changelog should preserve the second issue entry"
+assert_contains "$archived_changelog" "$active_batch_id" "archived changelog should identify the release batch"
+
+reset_changelog=$(read_file "$REPO_DIR/CHANGELOG.md")
+assert_contains "$reset_changelog" "No unreleased entries yet." "root CHANGELOG should reset after promotion"
+assert_not_contains "$reset_changelog" "issue #9001" "root CHANGELOG should clear released entries after promotion"
+
 release_task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/release-20260315/task.json")
 assert_eq "$release_task_status" "done" "the local promotion task should complete cleanly"
+
+release_task_json=$(read_file "$REPO_DIR/.harness/tasks/release-20260315/task.json")
+assert_contains "$release_task_json" '"release_changelog_path": "artifacts/releases/' "release promotion task should record the archived changelog path"
 
 printf 'check-release-tracking passed\n'

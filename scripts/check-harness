@@ -41,6 +41,7 @@ scripts=(
   scripts/check-sync-owned-paths
   scripts/check-stage-reporting
   scripts/check-task-control-room-once
+  scripts/check-task-create
   scripts/check-task-run-once
   scripts/openclaw-manager-setup
   scripts/task-control-room-once
@@ -75,5 +76,6 @@ scripts/check-sync-owned-paths --self-test
 scripts/check-sync-owned-paths
 scripts/check-stage-reporting
 scripts/check-task-control-room-once
+scripts/check-task-create
 scripts/check-task-run-once
 printf 'check-harness passed\n'

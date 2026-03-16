@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SOURCE_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
+
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+write_mock_gh() {
+  local bin_dir="$1"
+
+  mkdir -p "$bin_dir"
+  cat >"$bin_dir/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+  issue)
+    shift
+    case "${1:-}" in
+      view)
+        cat <<'JSON'
+{
+  "number": 42,
+  "title": "Synthetic issue 42",
+  "body": "",
+  "url": "https://example.test/issues/42",
+  "labels": [],
+  "assignees": [],
+  "state": "OPEN"
+}
+JSON
+        exit 0
+        ;;
+    esac
+    ;;
+  auth)
+    case "${2:-}" in
+      status) exit 0 ;;
+      token) printf 'mock-token\n'; exit 0 ;;
+    esac
+    ;;
+  repo)
+    case "${2:-}" in
+      view) printf 'example/test-harness\n'; exit 0 ;;
+    esac
+    ;;
+esac
+
+printf 'unsupported gh invocation: %s %s\n' "$1" "$*" >&2
+exit 1
+EOF
+  chmod +x "$bin_dir/gh"
+}
+
+assert_eq() {
+  local actual="$1"
+  local expected="$2"
+  local message="$3"
+
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'assert_eq failed: %s\nexpected: %s\nactual:   %s\n' "$message" "$expected" "$actual" >&2
+    exit 1
+  fi
+}
+
+setup_fixture() {
+  FIXTURE_DIR="$TMP_DIR/task-create"
+  REPO_DIR="$FIXTURE_DIR/repo"
+  REMOTE_DIR="$FIXTURE_DIR/remote.git"
+  BIN_DIR="$FIXTURE_DIR/bin"
+
+  mkdir -p "$FIXTURE_DIR"
+  write_mock_gh "$BIN_DIR"
+
+  rsync -a \
+    --exclude '.git' \
+    --exclude '.harness/state' \
+    --exclude '.harness/tasks' \
+    --exclude '.harness/logs' \
+    --exclude '.harness-manager' \
+    --exclude '.harness-session' \
+    "$SOURCE_ROOT/" "$REPO_DIR/"
+
+  git init --bare "$REMOTE_DIR" >/dev/null
+  git -C "$REPO_DIR" init -q -b main
+  git -C "$REPO_DIR" config user.name "Harness Test"
+  git -C "$REPO_DIR" config user.email "harness-test@example.com"
+  git -C "$REPO_DIR" add .
+  git -C "$REPO_DIR" commit -qm "fixture"
+  git -C "$REPO_DIR" branch dev
+  git -C "$REPO_DIR" remote add origin "$REMOTE_DIR"
+  git -C "$REPO_DIR" push -u origin main dev >/dev/null 2>&1
+
+  cat >>"$REPO_DIR/.harness/project.env" <<EOF
+HARNESS_REPO_SLUG="example/test-harness"
+HARNESS_WORKTREE_ROOT="$REPO_DIR/.tmp-worktrees"
+EOF
+}
+
+setup_fixture
+
+PATH="$BIN_DIR:$PATH" "$REPO_DIR/scripts/task-create" --issue 42 --json >/dev/null
+
+task_file="$REPO_DIR/.harness/tasks/issue-42/task.json"
+base_branch=$(jq -r '.base_branch' "$task_file")
+base_remote_ref=$(jq -r '.base_remote_ref' "$task_file")
+branch=$(jq -r '.branch' "$task_file")
+worktree=$(jq -r '.worktree' "$task_file")
+
+assert_eq "$base_branch" "dev" "task-create should default issue work to the integration branch"
+assert_eq "$base_remote_ref" "origin/dev" "task-create should record origin/dev as the remote base ref"
+assert_eq "$branch" "fix/issue-42" "issue tasks should keep the issue branch naming convention"
+[[ -d "$worktree" ]] || { printf 'expected worktree to exist: %s\n' "$worktree" >&2; exit 1; }
+
+printf 'check-task-create passed\n'
