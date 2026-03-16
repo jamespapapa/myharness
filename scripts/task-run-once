@@ -309,13 +309,13 @@ find_assigned_pending_task() {
   return 1
 }
 
-find_running_active_task() {
+find_explicit_running_task() {
   local active_json="$1"
   local task_json
 
   while IFS= read -r task_json; do
     [[ -n "$task_json" ]] || continue
-    if [[ "$(classify_active_task "$task_json")" == "running" ]]; then
+    if [[ "$(printf '%s' "$task_json" | jq -r '.claim_status // ""')" == "in_progress" ]]; then
       printf '%s\n' "$task_json"
       return 0
     fi
@@ -571,6 +571,14 @@ if [[ "$assigned_only" -eq 1 ]]; then
   assigned_total=$(printf '%s' "$assigned_tasks" | jq 'length')
   assigned_summary_text=$(active_summary "$assigned_tasks")
 
+  if running_task=$(find_explicit_running_task "$assigned_tasks" 2>/dev/null); then
+    running_task_id=$(printf '%s' "$running_task" | jq -r '.task_id // ""')
+    waiting_detail="assignment $(assignment_ref) already has active work; task=$running_task_id; $assigned_summary_text"
+    emit_log "waiting" "assignment already busy" "" "$running_task_id" "$waiting_detail"
+    printf 'waiting: %s\n' "$waiting_detail"
+    exit 0
+  fi
+
   if reconcilable_task=$(find_reconcilable_active_task "$assigned_tasks" 2>/dev/null); then
     reconcile_issue_number=$(printf '%s' "$reconcilable_task" | jq -r '.issue_number // ""')
     reconcile_task_id=$(printf '%s' "$reconcilable_task" | jq -r '.task_id')
@@ -582,14 +590,6 @@ if [[ "$assigned_only" -eq 1 ]]; then
     fi
     reconcile_task "$reconcilable_task"
     exit $?
-  fi
-
-  if running_task=$(find_running_active_task "$assigned_tasks" 2>/dev/null); then
-    running_task_id=$(printf '%s' "$running_task" | jq -r '.task_id // ""')
-    waiting_detail="assignment $(assignment_ref) already has active work; task=$running_task_id; $assigned_summary_text"
-    emit_log "waiting" "assignment already busy" "" "$running_task_id" "$waiting_detail"
-    printf 'waiting: %s\n' "$waiting_detail"
-    exit 0
   fi
 
   if pending_task=$(find_assigned_pending_task "$assigned_tasks" 2>/dev/null); then
