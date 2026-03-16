@@ -238,9 +238,7 @@ current_head_sha=$(printf '%s' "$current_pr_json" | jq -r '.headRefOid')
 
 if [[ "$reviewed_base_sha" != "$base_sha" || "$reviewed_head_sha" != "$head_sha" || "$current_base_sha" != "$base_sha" || "$current_head_sha" != "$head_sha" ]]; then
   harness_update_task_status "$task_id" "pr_open" "review artifact stale; PR head or base moved during review" "$pr_url"
-  if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
-    harness_issue_comment "$repo_slug" "$issue_number" "Harness note: review artifact became stale because the PR head or base changed during review."
-  fi
+  harness_record_stage_summary "$task_id" "review" "stale" "Review did not advance because its artifact no longer matched the current PR head and base." "$pr_url" "PR #$pr_number head or base changed during review."
   printf 'review stale: %s\n' "$task_id"
   exit 0
 fi
@@ -249,10 +247,12 @@ case "$verdict" in
   approved)
     harness_set_task_review_state "$task_id" "approved"
     harness_update_task_status "$task_id" "reviewed" "$summary" "$pr_url"
-    harness_record_stage_summary "$task_id" "review" "approved" "Review approved PR #$pr_number at head $head_sha." "$pr_url"
-    if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
-      harness_issue_comment "$repo_slug" "$issue_number" "Harness review approved for PR #$pr_number at head \`$head_sha\`."
+    if [[ -n "$summary" ]]; then
+      review_happened="Review approved PR #$pr_number at head $head_sha and cleared it for prepare: $summary"
+    else
+      review_happened="Review approved PR #$pr_number at head $head_sha and cleared it for prepare."
     fi
+    harness_record_stage_summary "$task_id" "review" "approved" "$review_happened" "$pr_url"
     printf 'review approved: %s\n' "$task_id"
     ;;
   rework)
@@ -273,7 +273,7 @@ case "$verdict" in
     fi
     harness_update_task_status "$task_id" "rework" "$rework_reason" "$pr_url"
     harness_set_task_review_state "$task_id" "rework" "$next_attempt"
-    harness_record_stage_summary "$task_id" "review" "rework" "Review requested automatic rework attempt $next_attempt of $rework_limit for PR #$pr_number at head $head_sha." "$pr_url"
+    harness_record_stage_summary "$task_id" "review" "rework" "Review requested automatic rework attempt $next_attempt of $rework_limit for PR #$pr_number at head $head_sha." "$pr_url" "$rework_reason"
     printf 'review rework: %s (%s/%s)\n' "$task_id" "$next_attempt" "$rework_limit"
     ;;
   rejected)

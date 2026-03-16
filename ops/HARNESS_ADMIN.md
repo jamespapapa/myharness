@@ -57,8 +57,8 @@ The human manager should spend time deciding scope and priority, not hand-carryi
 - `HARNESS_INTEGRATION_BRANCH` is the default source branch for new issue worktrees and the default PR target for issue work.
 - `HARNESS_RELEASE_BRANCH` stays separate for later promotion from the integration branch into release.
 - `HARNESS_BASE_BRANCH` remains a compatibility alias and resolves to the integration branch unless an operator overrides it explicitly.
-- When `task-land` merges an issue PR into `HARNESS_INTEGRATION_BRANCH`, the harness adds that issue to the active dev batch in `.harness/state/release-batches.json`.
-- When `task-land` merges a promotion PR whose head is `HARNESS_INTEGRATION_BRANCH` and base is `HARNESS_RELEASE_BRANCH`, the harness closes the active dev batch and stamps every shipped issue with release metadata.
+- When `task-land` merges an issue PR into `HARNESS_INTEGRATION_BRANCH`, the harness adds that issue to the active dev batch in `.harness/state/release-batches.json` and appends one concise unreleased line to the root `CHANGELOG.md`.
+- When `task-land` merges a promotion PR whose head is `HARNESS_INTEGRATION_BRANCH` and base is `HARNESS_RELEASE_BRANCH`, the harness closes the active dev batch, archives that batch changelog under `artifacts/releases/<batch-id>.md`, resets `CHANGELOG.md`, and stamps every shipped issue with release metadata.
 
 ## Production Checklist
 
@@ -67,9 +67,8 @@ Before you trust autonomous merge on a real repository:
 1. Update [.harness/prepare.commands](/Users/jules/Desktop/work/myharness/.harness/prepare.commands) with the repo's real `lint`, `test`, `build`, and invariant commands.
 2. Set `HARNESS_REQUIRE_GREEN_CHECKS="1"` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) if GitHub checks must be green before merge.
 3. Confirm the queue gate and execution slot count you want in [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml) (current defaults: one control tower, one execution slot, queue label `Ready`).
-4. If you want Jira comments, set `HARNESS_JIRA_BASE_URL`, `HARNESS_JIRA_USER_EMAIL`, and `HARNESS_JIRA_API_TOKEN` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env).
-5. Add GitHub issue forms, or require all intake to flow through `scripts/task-intake`.
-6. Decide how many executor workers you want, update `topology.execution.slot_count` plus `topology.execution.channels[]` in [project.yaml](/Users/jules/Desktop/work/myharness/.harness/project.yaml), then add the corresponding cron jobs.
+4. Add GitHub issue forms, or require all intake to flow through `scripts/task-intake`.
+5. Start with one repo-level `scripts/task-control-room-once` wake loop. Only add more execution slots, channels, or cron jobs if you intentionally want more repo-level concurrency.
 
 ## Documentation Coverage Gate
 
@@ -174,18 +173,6 @@ If you are creating issues manually in GitHub, keep the body structured so the w
 - What proof or behavior is required before merge?
 ```
 
-If the work should mirror into Jira, add one explicit line anywhere in the body:
-
-```md
-Jira: ABC-123
-```
-
-You can also use a browse URL instead:
-
-```md
-Jira: https://jira.example.test/browse/ABC-123
-```
-
 This seed repo does not yet enforce that contract through `.github/ISSUE_TEMPLATE/`, so use `scripts/task-intake` or apply this template manually.
 
 ### 2. Pick the next issue
@@ -273,14 +260,15 @@ Release batches are tracked locally in `.harness/state/release-batches.json`.
 That file keeps:
 
 - `active_batch_id`: the dev batch currently accumulating merged issue work
-- `batches[]`: append-only batch records with issue membership, merge window, and later release promotion metadata
+- `batches[]`: append-only batch records with issue membership, merge window, changelog paths, and later release promotion metadata
+- `active_changelog_path`: the root unreleased changelog path for the active batch (`CHANGELOG.md`)
 - `window_start` / `window_end`: the date window represented by the current or released dev train
-- `released_at`, `release_pr_url`, and `release_merge_sha`: the promotion stamp recorded when `dev` lands on `main`
+- `released_at`, `release_pr_url`, `release_merge_sha`, and `release_changelog_path`: the promotion stamp plus archived changelog path recorded when `dev` lands on `main`
 
 Issue sync behavior:
 
-- issue PR merged to `dev`: add `harness:in-dev-batch` and post a machine-readable `dev_batch_joined` comment payload
-- `dev` promoted to `main`: remove `harness:in-dev-batch`, add `harness:released`, and post a machine-readable `released_to_main` comment payload on each shipped issue
+- issue PR merged to `dev`: add `harness:in-dev-batch`, append an unreleased line to `CHANGELOG.md`, and post a machine-readable `dev_batch_joined` comment payload
+- `dev` promoted to `main`: remove `harness:in-dev-batch`, add `harness:released`, archive the batch changelog, reset `CHANGELOG.md`, and post a machine-readable `released_to_main` comment payload on each shipped issue
 
 Inspect the active batch:
 
@@ -339,12 +327,15 @@ The stable `stage_id` values are:
 - `review_rework`
 - `review_rejected`
 - `review_blocked`
+- `review_stale`
 - `prepare_passed`
 - `prepare_failed`
 - `prepare_blocked`
+- `prepare_stale`
 - `land_merged`
 - `land_failed`
 - `land_blocked`
+- `land_deferred`
 
 Each summary entry records:
 
@@ -354,36 +345,39 @@ Each summary entry records:
 - PR link when available
 - blocked reason and operator action when relevant
 
-These summaries are intended to be the reusable local reporting surface for the control-room and future integrations.
+These summaries are intended to be the reusable local reporting surface for the control-room, and every issue-backed task now mirrors them into GitHub issue comments so the issue thread stays the single external trace surface.
 
-## Jira Comment Sync
+## GitHub Issue Stage Comments
 
-Jira sync is opt-in and configuration-driven. The harness only posts Jira comments when all of these are true:
+For issue-backed tasks, the harness posts concise GitHub issue comments for major stage transitions after claim start, including:
 
-1. `.harness/project.env` sets `HARNESS_JIRA_BASE_URL`
-2. `.harness/project.env` sets `HARNESS_JIRA_USER_EMAIL`
-3. `.harness/project.env` sets `HARNESS_JIRA_API_TOKEN`
-4. the task or issue body contains an explicit Jira link line such as `Jira: ABC-123`
-
-When enabled, the harness posts concise comments for these major transitions:
-
-- claim started
 - executor started
 - executor reconciled to PR
 - review approved / rework / rejected / blocked
+- review stale
 - prepare passed / failed / blocked
+- prepare stale
 - land merged / failed / blocked
+- land deferred
 
-Jira comment format:
+Each issue comment includes:
 
-- task reference
-- GitHub issue reference
-- current stage label
-- what happened in that stage
+- the current stage label
+- the concrete result for that transition
 - PR URL when present
-- blocked reason and expected operator action when relevant
+- the blocking reason and next action when relevant
 
-The Jira comment body intentionally avoids raw local filesystem paths or full local logs.
+This comment stream is the canonical external trace surface. The harness does not maintain a parallel external-tracker sync path.
+
+## Executor Base Sync Before Handoff
+
+The Codex executor contract now requires a fresh remote-base sync before any final verification or review handoff:
+
+- read the base branch from `TASK.md`
+- fetch `origin/<base_branch>` before final verification
+- if the remote base advanced, merge it into the task branch
+- resolve conflicts safely, rerun verification, and only then hand off
+- if the merge cannot be completed cleanly or safely, record a blocker with an explicit reason instead of handing off stale work
 
 ## Autonomous Mode
 
@@ -533,6 +527,8 @@ cd /abs/path/to/worktree/.harness-session/codex
 codex
 ```
 
+Before the worker hands anything off, it must sync the task branch with the latest `origin/<base_branch>` named in `TASK.md`, rerun verification on the merged branch if that base moved, and record an explicit blocker if the merge is unsafe.
+
 ### “Keep processing the next eligible issue”
 
 Repeat:
@@ -548,7 +544,7 @@ The script skips issues already claimed or already labeled as active/PR-open/don
 - Worktree already exists: rerun `task-start`; it reuses the existing workspace.
 - Claim got stuck: use `scripts/task-finish --issue <n> --unclaim`.
 - Issue blocked: use `--blocked` so the queue state is visible.
-- PR opened manually: run `task-finish --pr <url>` after the fact to sync labels and clear the active claim.
+- PR opened manually: only run `task-finish --pr <url>` after the branch contains the latest `origin/<base_branch>` head and verification has been rerun on that merged branch.
 
 ## Non-Goals
 

@@ -96,9 +96,7 @@ pr_number=$(printf '%s' "$pr_json" | jq -r '.number')
 
 if [[ "$reviewed_base_sha" != "$current_base_sha" || "$reviewed_head_sha" != "$current_head_sha" ]]; then
   harness_update_task_status "$task_id" "pr_open" "review stale; PR head or base moved after review" "$pr_url"
-  if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
-    harness_issue_comment "$repo_slug" "$issue_number" "Harness note: review artifact is stale because PR #$pr_number head or base moved after review."
-  fi
+  harness_record_stage_summary "$task_id" "prepare" "stale" "Prepare did not run because the approved review artifact no longer matched the current PR head and base." "$pr_url" "PR #$pr_number head or base moved after review."
   printf 'prepare reset to pr_open: %s\n' "$task_id"
   exit 0
 fi
@@ -205,7 +203,7 @@ EOF
 EOF
 
   harness_update_task_status "$task_id" "prepare_failed" "prepare failed: $failed_command" "$pr_url"
-  harness_record_stage_summary "$task_id" "prepare" "failed" "Prepare failed while running verification gates." "$pr_url" "prepare failed: $failed_command"
+  harness_record_stage_summary "$task_id" "prepare" "failed" "Prepare failed while running verification gates for PR #$pr_number." "$pr_url" "prepare failed: $failed_command"
   harness_control_room_notify "blocked" "prepare" "$task_id" "$issue_number" "$repo_slug" "prepare failed: $failed_command"
   if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
     harness_issue_blocked "$repo_slug" "$issue_number" "prepare failed for PR #$pr_number: $failed_command"
@@ -246,9 +244,6 @@ cat >"$artifact_dir/prep.md" <<EOF
 EOF
 
 harness_update_task_status "$task_id" "prepared" "prepare passed" "$pr_url"
-harness_record_stage_summary "$task_id" "prepare" "passed" "Prepare passed for PR #$pr_number at head $current_head_sha." "$pr_url"
-if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
-  harness_issue_comment "$repo_slug" "$issue_number" "Harness prepare passed for PR #$pr_number at head \`$current_head_sha\`."
-fi
+harness_record_stage_summary "$task_id" "prepare" "passed" "Prepare passed for PR #$pr_number at head $current_head_sha and all configured verification gates succeeded." "$pr_url"
 
 printf 'prepare passed: %s\n' "$task_id"

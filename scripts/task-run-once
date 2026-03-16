@@ -311,7 +311,7 @@ collect_changed_files() {
 reconcile_task() {
   local task_json="$1"
   local issue_number task_id title worktree branch base_branch base_remote_ref base_sha repo_slug claim_key worker_log
-  local task_json_path status pr_url note ahead_count recovery_reason
+  local task_json_path status pr_url note ahead_count recovery_reason sync_reason
   local -a changed_files
 
   issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
@@ -355,36 +355,41 @@ reconcile_task() {
           git -C "$worktree" commit -m "fix: address issue #$issue_number" >/dev/null 2>&1 || true
         fi
 
-        if [[ -n "$base_remote_ref" ]]; then
-          ahead_count=$(git -C "$worktree" rev-list --count "${base_remote_ref}..HEAD" 2>/dev/null || echo 0)
-        elif [[ -n "$base_sha" ]]; then
-          ahead_count=$(git -C "$worktree" rev-list --count "${base_sha}..HEAD" 2>/dev/null || echo 0)
-        else
-          ahead_count=$(git -C "$worktree" rev-list --count "${base_branch}..HEAD" 2>/dev/null || echo 0)
-        fi
-        if [[ "${ahead_count:-0}" -gt 0 ]]; then
-          if git -C "$worktree" push -u origin "$branch" >/dev/null 2>&1; then
-            if [[ -z "$pr_url" ]]; then
-              pr_url=$(gh pr create -R "$repo_slug" --base "$base_branch" --head "$branch" --title "$title" --body-file "$(harness_task_dir "$task_id")/PR_BODY.md" 2>/dev/null || true)
+        if sync_reason=$(harness_task_base_sync_reason "$task_id" 2>/dev/null); then
+          if [[ -n "$base_remote_ref" ]]; then
+            ahead_count=$(git -C "$worktree" rev-list --count "${base_remote_ref}..HEAD" 2>/dev/null || echo 0)
+          elif [[ -n "$base_sha" ]]; then
+            ahead_count=$(git -C "$worktree" rev-list --count "${base_sha}..HEAD" 2>/dev/null || echo 0)
+          else
+            ahead_count=$(git -C "$worktree" rev-list --count "${base_branch}..HEAD" 2>/dev/null || echo 0)
+          fi
+          if [[ "${ahead_count:-0}" -gt 0 ]]; then
+            if git -C "$worktree" push -u origin "$branch" >/dev/null 2>&1; then
               if [[ -z "$pr_url" ]]; then
-                pr_url=$(gh pr list -R "$repo_slug" --head "$branch" --json url --jq '.[0].url // ""' 2>/dev/null || true)
+                pr_url=$(gh pr create -R "$repo_slug" --base "$base_branch" --head "$branch" --title "$title" --body-file "$(harness_task_dir "$task_id")/PR_BODY.md" 2>/dev/null || true)
+                if [[ -z "$pr_url" ]]; then
+                  pr_url=$(gh pr list -R "$repo_slug" --head "$branch" --json url --jq '.[0].url // ""' 2>/dev/null || true)
+                fi
               fi
-            fi
 
-            if [[ -n "$pr_url" ]]; then
-              "$SCRIPT_DIR/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null 2>&1 || true
+              if [[ -n "$pr_url" ]]; then
+                "$SCRIPT_DIR/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null 2>&1 || true
+              else
+                recovery_reason="executor reconcile pushed branch but could not open PR; branch=$branch"
+                "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
+              fi
             else
-              recovery_reason="executor reconcile pushed branch but could not open PR; branch=$branch"
+              recovery_reason="executor reconcile could not push branch $branch"
               "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
             fi
+          elif [[ -n "$pr_url" ]]; then
+            "$SCRIPT_DIR/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null 2>&1 || true
           else
-            recovery_reason="executor reconcile could not push branch $branch"
+            recovery_reason="executor reconcile found no commits, PR, or explicit task-finish; log=${worker_log:-unknown}"
             "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
           fi
-        elif [[ -n "$pr_url" ]]; then
-          "$SCRIPT_DIR/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null 2>&1 || true
         else
-          recovery_reason="executor reconcile found no commits, PR, or explicit task-finish; log=${worker_log:-unknown}"
+          recovery_reason="$sync_reason"
           "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
         fi
         ;;
@@ -426,22 +431,27 @@ reconcile_task() {
 
 run_worker_for_task() {
   local task_json="$1"
-  local issue_number task_id title worktree repo_slug claim_key worker_log finish_script gh_token worker_exit worker_prompt
-  local task_snapshot status pr_url note
-  local -a codex_env
+  task_id=$(printf '%s' "$task_json" | jq -r '.task_id')
+  harness_record_stage_summary "$task_id" "executor" "started" "Executor started a Codex worker for the assigned task."
+  launch_worker_for_task "$(harness_task_status_path "$task_id")" "assigned task launching Codex"
+}
 
+launch_worker_for_task() {
+  local task_json_path="$1"
+  local launch_message="$2"
+  local task_json issue_number task_id title worktree worker_log finish_script repo_slug claim_key gh_token worker_prompt
+  local -a codex_env
+  local worker_exit task_snapshot status pr_url note
+
+  task_json=$(cat "$task_json_path")
   issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
   task_id=$(printf '%s' "$task_json" | jq -r '.task_id')
   title=$(printf '%s' "$task_json" | jq -r '.title')
   worktree=$(printf '%s' "$task_json" | jq -r '.worktree')
-  repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
-  claim_key=$(printf '%s' "$task_json" | jq -r '.claim_key // ""')
-  if [[ -z "$claim_key" ]]; then
-    claim_key=$(harness_claim_key "$repo_slug" "$issue_number" "$task_id")
-  fi
-
   worker_log="$HARNESS_LOG_DIR/$task_id-$(date -u +%Y%m%dT%H%M%SZ).log"
   finish_script="$(harness_repo_root)/scripts/task-finish"
+  repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
+  claim_key=$(harness_claim_key "$repo_slug" "$issue_number" "$task_id")
   gh_token=""
   codex_env=()
   if harness_can_sync_github; then
@@ -451,9 +461,8 @@ run_worker_for_task() {
     codex_env=(GH_TOKEN="$gh_token" GITHUB_TOKEN="$gh_token")
   fi
 
-  emit_log "claimed" "assigned task launching Codex" "$issue_number" "$task_id" "$title"
+  emit_log "claimed" "$launch_message" "$issue_number" "$task_id" "$title"
   harness_update_claim_status "$claim_key" "in_progress" "executor running" "$worker_log"
-  harness_record_stage_summary "$task_id" "executor" "started" "Executor started a Codex worker for the assigned task."
 
   worker_prompt=$(cat <<EOF
 Read .harness-session/codex/AGENTS.md, .harness-session/codex/TASK.md, and .harness-session/codex/PR_BODY.md from the current repository root. Follow them exactly and complete the task end-to-end.
@@ -461,6 +470,9 @@ Read .harness-session/codex/AGENTS.md, .harness-session/codex/TASK.md, and .harn
 Important execution split:
 
 - You own code changes, verification, and a focused local git commit.
+- Before final verification or handoff, fetch the remote base branch named in TASK.md, check the latest origin/<base_branch> head, and merge that remote base into your branch if it advanced.
+- If the base branch moved, resolve the merge safely, rerun verification on the merged branch, and only then hand off.
+- If the latest remote base cannot be merged cleanly or safely, call $finish_script with an explicit blocker reason and stop instead of handing off stale work.
 - The parent harness process will handle push + PR creation after you exit if a local commit exists.
 - Only call $finish_script yourself when the task is blocked or when you need to record a terminal failure reason.
 - Do not spawn child agents or wait on other agents from this task worker.
@@ -510,9 +522,7 @@ EOF
       ;;
   esac
 
-  if reconcile_task "$task_snapshot"; then
-    return 0
-  fi
+  reconcile_task "$task_snapshot"
   return $?
 }
 
@@ -534,9 +544,7 @@ if [[ "$assigned_only" -eq 1 ]]; then
       printf 'waiting: %s\n' "$waiting_detail"
       exit 0
     fi
-    if reconcile_task "$reconcilable_task"; then
-      exit 0
-    fi
+    reconcile_task "$reconcilable_task"
     exit $?
   fi
 
@@ -549,9 +557,7 @@ if [[ "$assigned_only" -eq 1 ]]; then
       printf 'selected assigned issue #%s for %s: %s\n' "$issue_number" "$(assignment_ref)" "$title"
       exit 0
     fi
-    if run_worker_for_task "$pending_task"; then
-      exit 0
-    fi
+    run_worker_for_task "$pending_task"
     exit $?
   fi
 
@@ -578,9 +584,7 @@ if reconcilable_task=$(find_reconcilable_active_task "$active_tasks" 2>/dev/null
     printf 'waiting: %s\n' "$waiting_detail"
     exit 0
   fi
-  if reconcile_task "$reconcilable_task"; then
-    exit 0
-  fi
+  reconcile_task "$reconcilable_task"
   exit $?
 fi
 
@@ -612,13 +616,10 @@ if [[ -n "$next_rework_task" ]]; then
   claim_key=$(harness_claim_key "$repo_slug" "$rework_issue_number" "$rework_task_id")
   harness_write_claim "$claim_key" "$repo_slug" "$rework_issue_number" "$rework_task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "in_progress"
   harness_update_task_status "$rework_task_id" "in_progress" "automatic review rework attempt $rework_attempts of $rework_limit in progress" "$pr_url"
-  harness_record_stage_summary "$rework_task_id" "executor" "started" "Executor started automatic review rework attempt $rework_attempts of $rework_limit." "$pr_url"
+  harness_record_stage_summary "$rework_task_id" "executor" "started" "Executor started automatic review rework attempt $rework_attempts of $rework_limit on the existing PR branch." "$pr_url"
 
-  if run_worker_for_task "$(task_snapshot_by_id "$rework_task_id")"; then
-    exit 0
-  else
-    exit $?
-  fi
+  launch_worker_for_task "$task_json_path" "resumed automatic review rework"
+  exit $?
 fi
 
 if ! next_output=$(next_issue_json 2>&1); then
@@ -676,8 +677,6 @@ if ! start_output=$("$SCRIPT_DIR/task-start" --issue "$issue_number" --assign-sl
   exit 1
 fi
 
-task_snapshot=$(task_snapshot_by_id "$task_id")
-
 if [[ "$dispatch_only" -eq 1 ]]; then
   dispatch_detail="assigned issue #$issue_number to $(assignment_ref)"
   emit_log "success" "dispatched issue to assignment" "$issue_number" "$task_id" "$dispatch_detail"
@@ -685,7 +684,8 @@ if [[ "$dispatch_only" -eq 1 ]]; then
   exit 0
 fi
 
-if run_worker_for_task "$task_snapshot"; then
-  exit 0
-fi
+task_json_path=$(harness_task_status_path "$task_id")
+[[ -f "$task_json_path" ]] || harness_die "missing task.json for $task_id"
+harness_record_stage_summary "$task_id" "executor" "started" "Executor started a Codex worker and requires a fresh remote-base sync before handoff."
+launch_worker_for_task "$task_json_path" "claimed issue and launching Codex"
 exit $?

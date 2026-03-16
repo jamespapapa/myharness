@@ -24,7 +24,7 @@ As of 2026-03-13, this repo has live-validated:
 - one isolated executor run,
 - one review artifact pass,
 - one prepare artifact pass,
-- one `task-land` merge to `main`.
+- one `task-land` merge through the release flow.
 
 Validation reference:
 
@@ -89,7 +89,7 @@ One repo-level worker every 5 minutes:
 */5 * * * * cd /Users/jules/Desktop/work/myharness && ./scripts/task-control-room-once >> /Users/jules/Desktop/work/myharness/.harness/logs/control-room.stdout.log 2>&1
 ```
 
-Three repo channels using the same control-room tick:
+Intentional scale-out example with three repo-level control-room wakes:
 
 ```bash
 */5 * * * * cd /Users/jules/Desktop/work/myharness && ./scripts/task-control-room-once --log-file /Users/jules/Desktop/work/myharness/.harness/logs/control-room-1.jsonl >> /Users/jules/Desktop/work/myharness/.harness/logs/control-room-1.stdout.log 2>&1
@@ -113,6 +113,7 @@ That means one wake loop will:
 - merge already-prepared work first,
 - then run prepare for reviewed PRs,
 - then run review for open PRs,
+- then resume one queued `rework` task on its existing branch before claiming anything new,
 - then reconcile executor work and only claim new `Ready` issues if the repo is otherwise quiet.
 
 The manual lane scripts remain available if you want to debug or scale a specific stage:
@@ -145,7 +146,7 @@ openclaw cron add \
   --no-deliver
 ```
 
-If you need more throughput, add more identical jobs with different names.
+If you need more throughput, add more identical jobs with different names only intentionally. The default unattended shape is still one repo-level control-room wake.
 
 ## Operator Workflow
 

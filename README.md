@@ -20,10 +20,10 @@ What this repo gives you:
 - one-shot executor, review, prepare, and land workers
 - assigned-only executor mode for execution channels or worker slots
 - stage-by-stage summaries stored on each local task record
+- GitHub issue comments as the single external stage trace surface
 - tracked review / prepare / land artifacts under `artifacts/`
 - GitHub label and issue-state synchronization
 - active dev-batch and released-batch tracking in `.harness/state/release-batches.json`
-- optional Jira issue comment sync for linked tasks
 - optional Discord control-room updates for blocked and rejected outcomes
 - default queue gating so autonomous fetch consumes only issues labeled `Ready`
 
@@ -45,14 +45,14 @@ What you still need before using this on a real codebase:
 1. Replace [.harness/prepare.commands](/Users/jules/Desktop/work/myharness/.harness/prepare.commands) with project-specific `lint`, `test`, `build`, or invariant gates.
 2. Turn on required-check enforcement in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) by setting `HARNESS_REQUIRE_GREEN_CHECKS="1"` if you want merge to wait for GitHub checks.
 3. Set `HARNESS_CONTROL_ROOM_DISCORD_WEBHOOK_URL` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env) if you want blocked executor/review/prepare/land outcomes and review rejections to post concise operator-facing lines to a Discord control-room channel.
-4. Set `HARNESS_JIRA_BASE_URL`, `HARNESS_JIRA_USER_EMAIL`, and `HARNESS_JIRA_API_TOKEN` in [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env), then include `Jira: ABC-123` or a Jira browse URL in the task body if you want linked tasks to sync concise stage comments into Jira.
-5. Add GitHub issue forms or use `scripts/task-intake` consistently, because this seed repo does not yet enforce intake quality through `.github/ISSUE_TEMPLATE/`.
-6. If you want multiple repo channels or wider fan-out, add them on top of the control-room tick intentionally; the safe default here is one repo channel plus one serialized wake loop.
+4. Add GitHub issue forms or use `scripts/task-intake` consistently, because this seed repo does not yet enforce intake quality through `.github/ISSUE_TEMPLATE/`.
+5. If you want multiple repo channels or wider fan-out, add them on top of the control-room tick intentionally; the safe default here is one repo channel plus one serialized wake loop.
 
 Release tracking:
 
-- issue PRs merged to `dev` are added automatically to the active batch in `.harness/state/release-batches.json`
-- a `dev` -> `main` promotion PR merged through `scripts/task-land` closes that batch and stamps every shipped issue with release metadata
+- issue work targets `HARNESS_INTEGRATION_BRANCH` by default (`dev` in this seed), and merged issue PRs are added automatically to the active batch in `.harness/state/release-batches.json`
+- each issue merge into `dev` appends one concise unreleased entry to the root `CHANGELOG.md`
+- a `dev` -> `main` promotion PR merged through `scripts/task-land` closes that batch, archives the batch changelog under `artifacts/releases/<batch-id>.md`, stamps every shipped issue with release metadata, and resets `CHANGELOG.md` for the next batch
 - the operator inspection commands live in [ops/HARNESS_ADMIN.md](/Users/jules/Desktop/work/myharness/ops/HARNESS_ADMIN.md)
 
 Quick start:
@@ -70,7 +70,9 @@ scripts/task-control-room-once
 scripts/task-control-room-once --dispatch-only --assign-slot exec-1 --assign-channel project-dev-1
 ```
 
-Manual per-lane entrypoints:
+That one repo-level wake is the safe default. It already resumes queued `rework` tasks before claiming new `Ready` work, so you do not need a separate retry/autotender loop for the normal flow.
+
+Manual/debug per-lane entrypoints:
 
 ```bash
 scripts/task-run-once

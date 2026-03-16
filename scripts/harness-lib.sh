@@ -167,9 +167,6 @@ harness_load_project_env() {
   : "${HARNESS_REQUIRE_GREEN_CHECKS:=0}"
   : "${HARNESS_CONTROL_ROOM_DISCORD_WEBHOOK_URL:=}"
   : "${HARNESS_CONTROL_TOWER_CHANNEL_KEY:=$manifest_control_tower_key}"
-  : "${HARNESS_JIRA_BASE_URL:=}"
-  : "${HARNESS_JIRA_USER_EMAIL:=}"
-  : "${HARNESS_JIRA_API_TOKEN:=}"
   : "${HARNESS_LABEL_ACTIVE:=harness:in-progress}"
   : "${HARNESS_LABEL_PR_OPEN:=harness:pr-open}"
   : "${HARNESS_LABEL_DONE:=harness:done}"
@@ -267,8 +264,139 @@ harness_release_batch_id() {
   printf '%s-to-%s-%s-%s\n' "$integration" "$release" "$stamp" "$RANDOM"
 }
 
+harness_active_changelog_relpath() {
+  printf 'CHANGELOG.md\n'
+}
+
+harness_release_changelog_relpath() {
+  local batch_id
+  batch_id="${1:?}"
+  printf 'artifacts/releases/%s.md\n' "$batch_id"
+}
+
+harness_active_changelog_path() {
+  printf '%s/%s\n' "$(harness_repo_root)" "$(harness_active_changelog_relpath)"
+}
+
+harness_release_changelog_path() {
+  local batch_id
+  batch_id="${1:?}"
+  printf '%s/%s\n' "$(harness_repo_root)" "$(harness_release_changelog_relpath "$batch_id")"
+}
+
+harness_active_changelog_batch_id() {
+  local changelog_file
+  changelog_file="${1:-$(harness_active_changelog_path)}"
+  [[ -f "$changelog_file" ]] || return 0
+  sed -n 's/^<!-- batch:\(.*\) -->$/\1/p' "$changelog_file" | head -n 1
+}
+
+harness_write_active_changelog_header() {
+  local batch_id started_at changelog_file
+  batch_id="$1"
+  started_at="$2"
+  changelog_file=$(harness_active_changelog_path)
+  cat >"$changelog_file" <<EOF
+# CHANGELOG
+
+<!-- batch:$batch_id -->
+Active integration batch: $HARNESS_INTEGRATION_BRANCH -> $HARNESS_RELEASE_BRANCH
+Started: $started_at
+
+EOF
+}
+
+harness_reset_active_changelog() {
+  local changelog_file
+  changelog_file=$(harness_active_changelog_path)
+  cat >"$changelog_file" <<EOF
+# CHANGELOG
+
+Active integration batch: $HARNESS_INTEGRATION_BRANCH -> $HARNESS_RELEASE_BRANCH
+No unreleased entries yet.
+
+EOF
+}
+
+harness_ensure_active_changelog() {
+  local batch_id started_at changelog_file current_batch
+  batch_id="$1"
+  started_at="${2:-$(harness_now_utc)}"
+  changelog_file=$(harness_active_changelog_path)
+  current_batch=$(harness_active_changelog_batch_id "$changelog_file" || true)
+  if [[ ! -f "$changelog_file" || "$current_batch" != "$batch_id" ]]; then
+    harness_write_active_changelog_header "$batch_id" "$started_at"
+  fi
+}
+
+harness_append_issue_to_active_changelog() {
+  local task_id issue_number pr_number pr_url merge_sha merged_at batch_id
+  local title changelog_file entry_marker merged_day
+  task_id="$1"
+  issue_number="$2"
+  pr_number="$3"
+  pr_url="$4"
+  merge_sha="$5"
+  merged_at="$6"
+  batch_id="$7"
+
+  title=$(harness_task_field "$task_id" '.title // ""' 2>/dev/null || true)
+  [[ -n "$title" ]] || title="Issue $issue_number"
+  harness_ensure_active_changelog "$batch_id" "$merged_at"
+  changelog_file=$(harness_active_changelog_path)
+  entry_marker="<!-- issue:$issue_number -->"
+  if grep -Fq "$entry_marker" "$changelog_file" 2>/dev/null; then
+    return 0
+  fi
+
+  merged_day="${merged_at%%T*}"
+  {
+    printf '%s\n' "$entry_marker"
+    printf -- '- %s · issue #%s · %s (PR #%s)\n' "$merged_day" "$issue_number" "$title" "$pr_number"
+  } >>"$changelog_file"
+}
+
+harness_archive_active_changelog() {
+  local batch_id released_at pr_number pr_url merge_sha
+  local active_file archive_file archive_relpath release_dir current_batch
+  batch_id="$1"
+  released_at="$2"
+  pr_number="$3"
+  pr_url="$4"
+  merge_sha="$5"
+
+  active_file=$(harness_active_changelog_path)
+  archive_relpath=$(harness_release_changelog_relpath "$batch_id")
+  archive_file=$(harness_release_changelog_path "$batch_id")
+  release_dir=$(dirname "$archive_file")
+  current_batch=$(harness_active_changelog_batch_id "$active_file" || true)
+  mkdir -p "$release_dir"
+
+  if [[ ! -f "$archive_file" ]]; then
+    cat >"$archive_file" <<EOF
+# Release Changelog
+
+- batch: $batch_id
+- integration: $HARNESS_INTEGRATION_BRANCH -> $HARNESS_RELEASE_BRANCH
+- released_at: $released_at
+- release_pr: $pr_url
+- release_pr_number: #$pr_number
+- release_merge_sha: $merge_sha
+
+EOF
+    if [[ -f "$active_file" && "$current_batch" == "$batch_id" ]]; then
+      cat "$active_file" >>"$archive_file"
+    else
+      printf '%s\n' '_No active CHANGELOG.md content was available for this batch._' >>"$archive_file"
+    fi
+  fi
+
+  harness_reset_active_changelog
+  printf '%s\n' "$archive_relpath"
+}
+
 harness_record_issue_in_active_release_batch() {
-  local task_id issue_number pr_number pr_url merge_sha merged_at release_file active_batch_id
+  local task_id issue_number pr_number pr_url merge_sha merged_at release_file active_batch_id active_changelog_path
   local status_file had_lock
   task_id="$1"
   issue_number="$2"
@@ -283,6 +411,7 @@ harness_record_issue_in_active_release_batch() {
   harness_acquire_lock
   release_file=$(harness_release_batches_path)
   active_batch_id=$(jq -r '.active_batch_id // ""' "$release_file")
+  active_changelog_path=$(harness_active_changelog_relpath)
 
   if [[ -z "$active_batch_id" || "$active_batch_id" == "null" ]]; then
     active_batch_id=$(harness_release_batch_id)
@@ -290,6 +419,7 @@ harness_record_issue_in_active_release_batch() {
       --arg batch_id "$active_batch_id" \
       --arg integration_branch "$HARNESS_INTEGRATION_BRANCH" \
       --arg release_branch "$HARNESS_RELEASE_BRANCH" \
+      --arg active_changelog_path "$active_changelog_path" \
       --arg created_at "$merged_at" '
         .integration_branch = $integration_branch
         | .release_branch = $release_branch
@@ -302,10 +432,12 @@ harness_record_issue_in_active_release_batch() {
             created_at: $created_at,
             window_start: $created_at,
             window_end: $created_at,
+            active_changelog_path: $active_changelog_path,
             released_at: null,
             release_pr_number: null,
             release_pr_url: null,
             release_merge_sha: null,
+            release_changelog_path: null,
             issues: []
           }]
       ' "$release_file" >"$release_file.tmp"
@@ -316,6 +448,7 @@ harness_record_issue_in_active_release_batch() {
     --arg batch_id "$active_batch_id" \
     --arg integration_branch "$HARNESS_INTEGRATION_BRANCH" \
     --arg release_branch "$HARNESS_RELEASE_BRANCH" \
+    --arg active_changelog_path "$active_changelog_path" \
     --arg task_id "$task_id" \
     --arg pr_url "$pr_url" \
     --arg merge_sha "$merge_sha" \
@@ -332,6 +465,7 @@ harness_record_issue_in_active_release_batch() {
                 .integration_branch = $integration_branch
                 | .release_branch = $release_branch
                 | .status = "active"
+                | .active_changelog_path = $active_changelog_path
                 | .window_start = (
                     if ((.window_start // "") | length) == 0 or $merged_at < .window_start
                     then $merged_at
@@ -355,10 +489,12 @@ harness_record_issue_in_active_release_batch() {
                               | .pr_url = $pr_url
                               | .merge_sha = $merge_sha
                               | .merged_at = $merged_at
+                              | .integration_changelog_path = $active_changelog_path
                               | .released_at = null
                               | .release_pr_number = null
                               | .release_pr_url = null
                               | .release_merge_sha = null
+                              | .release_changelog_path = null
                             else .
                             end
                           )
@@ -370,10 +506,12 @@ harness_record_issue_in_active_release_batch() {
                           pr_url: $pr_url,
                           merge_sha: $merge_sha,
                           merged_at: $merged_at,
+                          integration_changelog_path: $active_changelog_path,
                           released_at: null,
                           release_pr_number: null,
                           release_pr_url: null,
-                          release_merge_sha: null
+                          release_merge_sha: null,
+                          release_changelog_path: null
                         }]
                       end
                   )
@@ -389,14 +527,18 @@ harness_record_issue_in_active_release_batch() {
     jq \
       --arg batch_id "$active_batch_id" \
       --arg merged_at "$merged_at" \
-      --arg merge_sha "$merge_sha" '
+      --arg merge_sha "$merge_sha" \
+      --arg integration_changelog_path "$active_changelog_path" '
         .release_batch_id = $batch_id
         | .merged_to_integration_at = $merged_at
         | .integration_merge_sha = $merge_sha
-        | del(.released_to_main_at, .release_pr_url, .release_pr_number, .release_merge_sha)
+        | .integration_changelog_path = $integration_changelog_path
+        | del(.released_to_main_at, .release_pr_url, .release_pr_number, .release_merge_sha, .release_changelog_path)
       ' "$status_file" >"$status_file.tmp"
     mv "$status_file.tmp" "$status_file"
   fi
+
+  harness_append_issue_to_active_changelog "$task_id" "$issue_number" "$pr_number" "$pr_url" "$merge_sha" "$merged_at" "$active_batch_id"
 
   if [[ "$had_lock" != "1" ]]; then
     harness_release_lock
@@ -407,7 +549,7 @@ harness_record_issue_in_active_release_batch() {
 
 harness_promote_active_release_batch() {
   local task_id pr_number pr_url merge_sha released_at repo_slug
-  local release_file active_batch_id issue_numbers status_file had_lock
+  local release_file active_batch_id issue_numbers status_file had_lock release_changelog_path
   task_id="$1"
   pr_number="$2"
   pr_url="$3"
@@ -434,11 +576,13 @@ harness_promote_active_release_batch() {
     | select(.id == $batch_id)
     | .issues[]?.issue_number
   ' "$release_file")
+  release_changelog_path=$(harness_archive_active_changelog "$active_batch_id" "$released_at" "$pr_number" "$pr_url" "$merge_sha")
 
   jq \
     --arg batch_id "$active_batch_id" \
     --arg integration_branch "$HARNESS_INTEGRATION_BRANCH" \
     --arg release_branch "$HARNESS_RELEASE_BRANCH" \
+    --arg release_changelog_path "$release_changelog_path" \
     --arg released_at "$released_at" \
     --arg pr_url "$pr_url" \
     --arg merge_sha "$merge_sha" \
@@ -457,12 +601,14 @@ harness_promote_active_release_batch() {
                 | .release_pr_number = $pr_number
                 | .release_pr_url = $pr_url
                 | .release_merge_sha = $merge_sha
+                | .release_changelog_path = $release_changelog_path
                 | .issues = [
                     (.issues // [])[]
                     | .released_at = $released_at
                     | .release_pr_number = $pr_number
                     | .release_pr_url = $pr_url
                     | .release_merge_sha = $merge_sha
+                    | .release_changelog_path = $release_changelog_path
                   ]
               else .
               end
@@ -478,12 +624,14 @@ harness_promote_active_release_batch() {
       --arg pr_url "$pr_url" \
       --arg merge_sha "$merge_sha" \
       --arg batch_id "$active_batch_id" \
+      --arg release_changelog_path "$release_changelog_path" \
       --argjson pr_number "$pr_number" '
         .release_batch_id = $batch_id
         | .released_to_main_at = $released_at
         | .release_pr_url = $pr_url
         | .release_pr_number = $pr_number
         | .release_merge_sha = $merge_sha
+        | .release_changelog_path = $release_changelog_path
       ' "$status_file" >"$status_file.tmp"
     mv "$status_file.tmp" "$status_file"
   fi
@@ -1172,46 +1320,6 @@ harness_run_prepare_commands() {
   done <"$commands_file"
 }
 
-harness_extract_jira_issue_key_from_text() {
-  local text line key
-  text="${1:-}"
-  [[ -n "$text" ]] || return 1
-
-  line=$(printf '%s\n' "$text" | grep -im1 -E '^[[:space:]>*-]*jira([[:space:]]+issue)?[[:space:]]*:' || true)
-  if [[ -n "$line" ]]; then
-    key=$(printf '%s\n' "$line" | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | head -n 1 || true)
-    if [[ -n "$key" ]]; then
-      printf '%s\n' "$key"
-      return 0
-    fi
-  fi
-
-  key=$(printf '%s\n' "$text" \
-    | grep -oE 'https?://[^[:space:]]+/browse/[A-Z][A-Z0-9]+-[0-9]+' \
-    | sed -E 's#.*/browse/([A-Z][A-Z0-9]+-[0-9]+)$#\1#' \
-    | head -n 1 || true)
-  [[ -n "$key" ]] || return 1
-  printf '%s\n' "$key"
-}
-
-harness_jira_issue_url() {
-  local issue_key base_url
-  issue_key="${1:-}"
-
-  harness_load_project_env
-  base_url="${HARNESS_JIRA_BASE_URL%/}"
-  [[ -n "$issue_key" && -n "$base_url" ]] || return 1
-  printf '%s/browse/%s\n' "$base_url" "$issue_key"
-}
-
-harness_can_sync_jira() {
-  harness_load_project_env
-  command -v curl >/dev/null 2>&1 || return 1
-  [[ -n "${HARNESS_JIRA_BASE_URL:-}" ]] || return 1
-  [[ -n "${HARNESS_JIRA_USER_EMAIL:-}" ]] || return 1
-  [[ -n "${HARNESS_JIRA_API_TOKEN:-}" ]] || return 1
-}
-
 harness_stage_status_id() {
   local stage event
   stage="${1:-}"
@@ -1226,12 +1334,15 @@ harness_stage_status_id() {
     review:rework) printf 'review_rework\n' ;;
     review:rejected) printf 'review_rejected\n' ;;
     review:blocked) printf 'review_blocked\n' ;;
+    review:stale) printf 'review_stale\n' ;;
     prepare:passed) printf 'prepare_passed\n' ;;
     prepare:failed) printf 'prepare_failed\n' ;;
     prepare:blocked) printf 'prepare_blocked\n' ;;
+    prepare:stale) printf 'prepare_stale\n' ;;
     land:merged) printf 'land_merged\n' ;;
     land:failed) printf 'land_failed\n' ;;
     land:blocked) printf 'land_blocked\n' ;;
+    land:deferred) printf 'land_deferred\n' ;;
     *)
       harness_die "unsupported stage summary event: $stage/$event"
       ;;
@@ -1251,12 +1362,15 @@ harness_stage_label() {
     review_rework) printf 'review rework\n' ;;
     review_rejected) printf 'review rejected\n' ;;
     review_blocked) printf 'review blocked\n' ;;
+    review_stale) printf 'review stale\n' ;;
     prepare_passed) printf 'prepare passed\n' ;;
     prepare_failed) printf 'prepare failed\n' ;;
     prepare_blocked) printf 'prepare blocked\n' ;;
+    prepare_stale) printf 'prepare stale\n' ;;
     land_merged) printf 'land merged\n' ;;
     land_failed) printf 'land failed\n' ;;
     land_blocked) printf 'land blocked\n' ;;
+    land_deferred) printf 'land deferred\n' ;;
     *)
       harness_die "unsupported stage label: $stage_id"
       ;;
@@ -1272,7 +1386,7 @@ harness_stage_operator_action() {
       printf 'Inspect the worker outcome, then rerun or requeue the task.'
       ;;
     review_rework)
-      printf ''
+      printf 'Executor should repair the same PR branch, rerun verification, and hand back the updated head.'
       ;;
     review_rejected)
       printf 'Inspect the review findings, then revise the PR or close the task.'
@@ -1280,11 +1394,20 @@ harness_stage_operator_action() {
     review_blocked)
       printf 'Inspect the review run, then rerun review or fix the PR.'
       ;;
+    review_stale)
+      printf 'Rerun review on the latest PR head after the branch settles.'
+      ;;
     prepare_failed|prepare_blocked)
       printf 'Fix the failing verification gate or blocker, then rerun prepare.'
       ;;
+    prepare_stale)
+      printf 'Rerun review and prepare on the latest PR head before landing.'
+      ;;
     land_failed|land_blocked)
       printf 'Resolve the merge or checks blocker, then rerun land.'
+      ;;
+    land_deferred)
+      printf 'Refresh review and prepare artifacts on the current PR head, then rerun land.'
       ;;
     *)
       printf ''
@@ -1292,50 +1415,18 @@ harness_stage_operator_action() {
   esac
 }
 
-harness_jira_comment() {
-  local issue_key body payload auth_header base_url
-  issue_key="$1"
-  body="$2"
+harness_issue_stage_comment() {
+  local repo issue_number stage_label happened pr_url blocked_reason next_action comment_body
+  repo="$1"
+  issue_number="$2"
+  stage_label="$3"
+  happened="${4:-}"
+  pr_url="${5:-}"
+  blocked_reason="${6:-}"
+  next_action="${7:-}"
 
-  harness_can_sync_jira || return 1
-  [[ -n "$issue_key" ]] || return 1
-
-  payload=$(jq -nc --arg body "$body" '{body:$body}')
-  auth_header=$(printf '%s:%s' "$HARNESS_JIRA_USER_EMAIL" "$HARNESS_JIRA_API_TOKEN" | base64 | tr -d '\n')
-  base_url="${HARNESS_JIRA_BASE_URL%/}"
-
-  curl -fsS \
-    -H "Authorization: Basic $auth_header" \
-    -H "Accept: application/json" \
-    -H "Content-Type: application/json" \
-    -X POST \
-    -d "$payload" \
-    "$base_url/rest/api/2/issue/$issue_key/comment" >/dev/null
-}
-
-harness_sync_jira_stage_summary() {
-  local task_id stage_id happened pr_url blocked_reason next_action task_json jira_issue_key issue_number repo_slug issue_reference comment_body issue_body
-  task_id="$1"
-  stage_id="$2"
-  happened="${3:-}"
-  pr_url="${4:-}"
-  blocked_reason="${5:-}"
-  next_action="${6:-}"
-
-  harness_can_sync_jira || return 0
-  harness_task_exists "$task_id" || return 0
-
-  task_json=$(harness_task_json "$task_id")
-  jira_issue_key=$(printf '%s' "$task_json" | jq -r '.jira_issue_key // ""')
-  if [[ -z "$jira_issue_key" ]]; then
-    issue_body=$(printf '%s' "$task_json" | jq -r '.issue_body // ""')
-    jira_issue_key=$(harness_extract_jira_issue_key_from_text "$issue_body" 2>/dev/null || true)
-  fi
-  [[ -n "$jira_issue_key" ]] || return 0
-
-  issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
-  repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
-  issue_reference=$(harness_control_room_reference "$task_id" "$issue_number" "$repo_slug")
+  harness_can_sync_github || return 0
+  [[ -n "$repo" && -n "$issue_number" ]] || return 0
 
   happened=$(harness_truncate_text "$happened" 320)
   blocked_reason=$(harness_truncate_text "$blocked_reason" 220)
@@ -1343,23 +1434,36 @@ harness_sync_jira_stage_summary() {
 
   comment_body=$(
     cat <<EOF
-Harness stage update
+Harness stage update: $stage_label.
 
-- task: \`$task_id\`
-- issue: \`$issue_reference\`
-- stage: \`$(harness_stage_label "$stage_id")\`
-- happened: $happened
-$(if [[ -n "$pr_url" ]]; then printf -- '- pr: %s\n' "$pr_url"; fi)$(if [[ -n "$blocked_reason" ]]; then printf -- '- blocked_reason: %s\n' "$blocked_reason"; fi)$(if [[ -n "$next_action" ]]; then printf -- '- operator_action: %s\n' "$next_action"; fi)
+- result: $happened
+$(if [[ -n "$pr_url" ]]; then printf -- '- pr: %s\n' "$pr_url"; fi)$(if [[ -n "$blocked_reason" ]]; then printf -- '- reason: %s\n' "$blocked_reason"; fi)$(if [[ -n "$next_action" ]]; then printf -- '- next: %s\n' "$next_action"; fi)
 EOF
   )
 
-  if ! harness_jira_comment "$jira_issue_key" "$comment_body"; then
-    harness_notice "jira comment sync failed for $jira_issue_key ($stage_id)"
-  fi
+  harness_issue_comment "$repo" "$issue_number" "$comment_body"
+}
+
+harness_sync_github_stage_summary() {
+  local task_id stage_id happened pr_url blocked_reason next_action task_json issue_number repo_slug
+  task_id="$1"
+  stage_id="$2"
+  happened="${3:-}"
+  pr_url="${4:-}"
+  blocked_reason="${5:-}"
+  next_action="${6:-}"
+
+  harness_task_exists "$task_id" || return 0
+
+  task_json=$(harness_task_json "$task_id")
+  issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
+  repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
+  harness_issue_stage_comment "$repo_slug" "$issue_number" "$(harness_stage_label "$stage_id")" "$happened" "$pr_url" "$blocked_reason" "$next_action" \
+    || harness_notice "github issue comment sync failed for $task_id ($stage_id)"
 }
 
 harness_record_stage_summary() {
-  local task_id stage event happened pr_url blocked_reason next_action stage_id task_json status_file summary_json now had_lock issue_number repo_slug issue_reference jira_issue_key issue_body
+  local task_id stage event happened pr_url blocked_reason next_action stage_id task_json status_file summary_json now had_lock issue_number repo_slug issue_reference
   task_id="$1"
   stage="$2"
   event="$3"
@@ -1390,11 +1494,6 @@ harness_record_stage_summary() {
   task_json=$(cat "$status_file")
   issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
   repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
-  jira_issue_key=$(printf '%s' "$task_json" | jq -r '.jira_issue_key // ""')
-  if [[ -z "$jira_issue_key" ]]; then
-    issue_body=$(printf '%s' "$task_json" | jq -r '.issue_body // ""')
-    jira_issue_key=$(harness_extract_jira_issue_key_from_text "$issue_body" 2>/dev/null || true)
-  fi
   issue_reference=$(harness_control_room_reference "$task_id" "$issue_number" "$repo_slug")
   now=$(harness_now_utc)
 
@@ -1406,7 +1505,6 @@ harness_record_stage_summary() {
     --arg task_id "$task_id" \
     --arg issue_reference "$issue_reference" \
     --arg repo_slug "$repo_slug" \
-    --arg jira_issue_key "$jira_issue_key" \
     --arg pr_url "$pr_url" \
     --arg happened "$happened" \
     --arg blocked_reason "$blocked_reason" \
@@ -1421,7 +1519,6 @@ harness_record_stage_summary() {
       issue_number: $issue_number,
       repo_slug: $repo_slug,
       issue_reference: $issue_reference,
-      jira_issue_key: $jira_issue_key,
       pr_url: $pr_url,
       happened: $happened,
       blocked_reason: $blocked_reason,
@@ -1441,7 +1538,7 @@ harness_record_stage_summary() {
     harness_release_lock
   fi
 
-  harness_sync_jira_stage_summary "$task_id" "$stage_id" "$happened" "$pr_url" "$blocked_reason" "$next_action"
+  harness_sync_github_stage_summary "$task_id" "$stage_id" "$happened" "$pr_url" "$blocked_reason" "$next_action"
 }
 
 harness_status_check_summary() {
@@ -1726,9 +1823,6 @@ harness_issue_started() {
   if [[ -n "$login" ]]; then
     gh issue edit "$issue_number" -R "$repo" --add-assignee "$login" >/dev/null 2>&1 || true
   fi
-
-  harness_issue_comment "$repo" "$issue_number" \
-    "Harness claim started.\n\n- task: \`$task_id\`\n- branch: \`$branch\`\n- worktree: \`$worktree\`"
 }
 
 harness_issue_pr_open() {
@@ -1743,9 +1837,6 @@ harness_issue_pr_open() {
     --remove-label "$HARNESS_LABEL_ACTIVE" \
     --remove-label "$HARNESS_LABEL_BLOCKED" \
     --add-label "$HARNESS_LABEL_PR_OPEN" >/dev/null 2>&1 || true
-
-  harness_issue_comment "$repo" "$issue_number" \
-    "Harness status update: PR opened.\n\n- pr: $pr_url"
 }
 
 harness_issue_blocked() {
@@ -1760,9 +1851,6 @@ harness_issue_blocked() {
     --remove-label "$HARNESS_LABEL_ACTIVE" \
     --remove-label "$HARNESS_LABEL_PR_OPEN" \
     --add-label "$HARNESS_LABEL_BLOCKED" >/dev/null 2>&1 || true
-
-  harness_issue_comment "$repo" "$issue_number" \
-    "Harness status update: blocked.\n\n- reason: $reason"
 }
 
 harness_issue_rejected() {
@@ -1777,9 +1865,6 @@ harness_issue_rejected() {
     --remove-label "$HARNESS_LABEL_ACTIVE" \
     --remove-label "$HARNESS_LABEL_BLOCKED" \
     --add-label "$HARNESS_LABEL_PR_OPEN" >/dev/null 2>&1 || true
-
-  harness_issue_comment "$repo" "$issue_number" \
-    "Harness status update: rejected.\n\n- reason: $reason"
 }
 
 harness_issue_done() {
@@ -1795,13 +1880,6 @@ harness_issue_done() {
     --remove-label "$HARNESS_LABEL_PR_OPEN" \
     --remove-label "$HARNESS_LABEL_BLOCKED" \
     --add-label "$HARNESS_LABEL_DONE" >/dev/null 2>&1 || true
-
-  if [[ -n "$pr_url" ]]; then
-    harness_issue_comment "$repo" "$issue_number" \
-      "Harness status update: merged.\n\n- pr: $pr_url"
-  else
-    harness_issue_comment "$repo" "$issue_number" "Harness status update: merged."
-  fi
 }
 
 harness_issue_unclaim() {
@@ -1831,6 +1909,35 @@ harness_ensure_base_branch() {
   git -C "$root" fetch origin "$base" >/dev/null
   git -C "$root" show-ref --verify --quiet "$remote_ref" \
     || harness_die "remote base branch not found after fetch: origin/$base"
+}
+
+harness_task_base_sync_reason() {
+  local task_id task_json worktree branch base_branch base_remote_ref remote_base_sha
+  task_id="$1"
+
+  harness_task_exists "$task_id" || return 1
+  task_json=$(harness_task_json "$task_id")
+  worktree=$(printf '%s' "$task_json" | jq -r '.worktree // ""')
+  branch=$(printf '%s' "$task_json" | jq -r '.branch // ""')
+  base_branch=$(printf '%s' "$task_json" | jq -r '.base_branch // ""')
+  base_remote_ref=$(printf '%s' "$task_json" | jq -r '.base_remote_ref // ""')
+
+  [[ -n "$worktree" && -n "$base_branch" ]] || return 1
+  if [[ -z "$base_remote_ref" ]]; then
+    base_remote_ref=$(harness_remote_branch_ref "$base_branch")
+  fi
+
+  harness_ensure_base_branch "$base_branch"
+  remote_base_sha=$(git -C "$worktree" rev-parse "$base_remote_ref" 2>/dev/null || true)
+  [[ -n "$remote_base_sha" ]] || return 1
+
+  if git -C "$worktree" merge-base --is-ancestor "$remote_base_sha" HEAD >/dev/null 2>&1; then
+    return 0
+  fi
+
+  printf 'base branch sync required: %s is missing latest %s (%s); merge %s into %s, rerun verification, and only then hand off the task.\n' \
+    "$branch" "$base_remote_ref" "$remote_base_sha" "$base_remote_ref" "$branch"
+  return 1
 }
 
 harness_fetch_issue_json() {

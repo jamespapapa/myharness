@@ -107,9 +107,23 @@ if [[ -n "$blocked_reason" ]]; then
 fi
 
 if [[ -n "$pr_url" ]]; then
+  if sync_reason=$(harness_task_base_sync_reason "$task_id" 2>/dev/null); then
+    :
+  else
+    harness_remove_claim "$claim_key"
+    harness_update_task_status "$task_id" "blocked" "$sync_reason" ""
+    harness_record_stage_summary "$task_id" "executor" "blocked" "Executor could not hand off the task branch because it was behind the latest remote base." "$pr_url" "$sync_reason"
+    harness_control_room_notify "blocked" "executor" "$task_id" "$issue_number" "$repo_slug" "$sync_reason"
+    if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
+      harness_issue_blocked "$repo_slug" "$issue_number" "$sync_reason"
+    fi
+    printf 'task marked blocked: %s\n' "$task_id"
+    exit 0
+  fi
+
   harness_remove_claim "$claim_key"
   harness_update_task_status "$task_id" "pr_open" "pr opened" "$pr_url"
-  harness_record_stage_summary "$task_id" "executor" "reconciled_to_pr" "Executor reconciled the task to an open PR." "$pr_url"
+  harness_record_stage_summary "$task_id" "executor" "reconciled_to_pr" "Executor handed the task off to an open PR after syncing the branch with the latest remote base." "$pr_url"
   if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
     harness_issue_pr_open "$repo_slug" "$issue_number" "$pr_url"
   fi

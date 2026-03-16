@@ -134,6 +134,8 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
+prompt_log="${HARNESS_MOCK_CODEX_PROMPT_LOG:-}"
+prompt=""
 if [[ "${1:-}" == "exec" ]]; then
   shift
 fi
@@ -147,14 +149,29 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
+      prompt="$1"
       shift
       ;;
   esac
 done
 
+if [[ -n "$prompt_log" ]]; then
+  printf '%s\n' "$prompt" >>"$prompt_log"
+fi
+
 case "${HARNESS_MOCK_CODEX_MODE:-touch-readme}" in
   touch-readme)
     printf '\nACP reconcile proof from mock codex.\n' >>README.md
+    ;;
+  advance-base)
+    printf '\nACP reconcile proof from mock codex.\n' >>README.md
+    repo_dir="${HARNESS_MOCK_MAIN_REPO_DIR:?}"
+    git -C "$repo_dir" checkout -q dev
+    printf '\nBase branch advanced during executor run.\n' >>"$repo_dir/README.md"
+    git -C "$repo_dir" add README.md
+    git -C "$repo_dir" commit -qm "test: advance dev during executor run"
+    git -C "$repo_dir" push origin dev >/dev/null 2>&1
+    git -C "$repo_dir" checkout -q main
     ;;
   no-op)
     ;;
@@ -176,8 +193,10 @@ setup_fixture() {
   MOCK_STATE_DIR="$FIXTURE_DIR/mock-gh"
   BIN_DIR="$FIXTURE_DIR/bin"
   WORKTREE_ROOT="$FIXTURE_DIR/repo-worktrees"
+  PROMPT_LOG="$FIXTURE_DIR/codex-prompts.log"
 
   mkdir -p "$FIXTURE_DIR" "$MOCK_STATE_DIR"
+  : >"$PROMPT_LOG"
   write_mock_binaries "$BIN_DIR"
 
   rsync -a \
@@ -242,6 +261,8 @@ task_env() {
     PATH="$BIN_DIR:$PATH" \
     HARNESS_MOCK_GH_STATE_DIR="$MOCK_STATE_DIR" \
     HARNESS_MOCK_GH_REPO="example/test-harness" \
+    HARNESS_MOCK_CODEX_PROMPT_LOG="$PROMPT_LOG" \
+    HARNESS_MOCK_MAIN_REPO_DIR="$REPO_DIR" \
     "$@"
 }
 
@@ -268,7 +289,7 @@ assert_contains() {
 }
 
 scenario_claim_and_reconcile_to_pr_open() {
-  local output status claim_count
+  local output status claim_count prompt
 
   setup_fixture "claim-and-pr"
   write_mock_issue 9001 "Synthetic executor issue" '[{"name":"Ready"}]'
@@ -282,6 +303,29 @@ scenario_claim_and_reconcile_to_pr_open() {
 
   claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
   assert_eq "$claim_count" "0" "claim should be cleared after pr_open"
+
+  prompt=$(cat "$PROMPT_LOG")
+  assert_contains "$prompt" "fetch the remote base branch named in TASK.md" "executor prompt should require checking the latest remote base branch"
+  assert_contains "$prompt" "merge that remote base into your branch if it advanced" "executor prompt should require merging the advanced remote base before handoff"
+}
+
+scenario_blocks_stale_base_handoff() {
+  local output status note
+
+  setup_fixture "stale-base-handoff"
+  write_mock_issue 9004 "Synthetic stale handoff issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9004,"title":"Synthetic stale handoff issue","labels":[{"name":"Ready"}]}]'
+
+  if output=$(task_env HARNESS_MOCK_CODEX_MODE="advance-base" "$REPO_DIR/scripts/task-run-once" 2>&1); then
+    printf 'task-run-once should have blocked stale base handoff\n' >&2
+    exit 1
+  fi
+
+  status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9004/task.json")
+  note=$(jq -r '.note' "$REPO_DIR/.harness/tasks/issue-9004/task.json")
+  assert_eq "$status" "blocked" "executor should block if the task branch no longer contains the latest remote base"
+  assert_contains "$note" "base branch sync required:" "blocked note should explain the missing remote-base merge"
+  assert_contains "$output" "blocked: issue #9004 ->" "task-run-once should surface the stale base handoff as a blocked outcome"
 }
 
 scenario_waits_when_active_limit_is_full() {
@@ -579,5 +623,6 @@ scenario_recovers_stale_in_progress_task
 scenario_dispatch_only_records_assignment
 scenario_assigned_only_does_not_fetch_queue
 scenario_assigned_only_runs_preassigned_work
+scenario_blocks_stale_base_handoff
 
 printf 'check-task-run-once passed\n'
