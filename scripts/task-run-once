@@ -614,6 +614,18 @@ if [[ -n "$next_rework_task" ]]; then
   rework_attempts=$(jq -r '.review_rework_attempts // 0' "$task_json_path")
   rework_limit=$(jq -r '.review_rework_limit // 3' "$task_json_path")
   claim_key=$(harness_claim_key "$repo_slug" "$rework_issue_number" "$rework_task_id")
+
+  if [[ "$dispatch_only" -eq 1 ]]; then
+    harness_set_task_assignment "$rework_task_id" "$assignment_slot" "$assignment_channel" "$assigned_by"
+    harness_write_claim "$claim_key" "$repo_slug" "$rework_issue_number" "$rework_task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "assigned" "$assignment_slot" "$assignment_channel" "$assigned_by"
+    harness_update_task_status "$rework_task_id" "in_progress" "automatic review rework attempt $rework_attempts of $rework_limit assigned to $(assignment_ref)" "$pr_url"
+    harness_record_stage_summary "$rework_task_id" "executor" "started" "Executor assigned automatic review rework attempt $rework_attempts of $rework_limit to $(assignment_ref) without launching it locally." "$pr_url"
+    dispatch_detail="assigned review rework issue #$rework_issue_number to $(assignment_ref)"
+    emit_log "success" "dispatched review rework to assignment" "$rework_issue_number" "$rework_task_id" "$dispatch_detail"
+    printf 'success: dispatched review rework issue #%s -> %s\n' "$rework_issue_number" "$(assignment_ref)"
+    exit 0
+  fi
+
   harness_write_claim "$claim_key" "$repo_slug" "$rework_issue_number" "$rework_task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "in_progress"
   harness_update_task_status "$rework_task_id" "in_progress" "automatic review rework attempt $rework_attempts of $rework_limit in progress" "$pr_url"
   harness_record_stage_summary "$rework_task_id" "executor" "started" "Executor started automatic review rework attempt $rework_attempts of $rework_limit on the existing PR branch." "$pr_url"

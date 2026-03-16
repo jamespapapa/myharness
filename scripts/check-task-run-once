@@ -588,6 +588,46 @@ scenario_assigned_only_does_not_fetch_queue() {
   fi
 }
 
+scenario_dispatch_only_rework_stays_assigned() {
+  local output claim_status task_status worker_log assignment_slot assignment_channel note
+
+  setup_fixture "dispatch-rework"
+  write_mock_issue 9013 "Dispatch rework issue" '[{"name":"Ready"}]'
+  write_issue_list '[]'
+
+  task_env "$REPO_DIR/scripts/task-start" --issue 9013 --assign-slot slot-r --assign-channel exec-r >/dev/null
+  jq '
+    .status = "rework"
+    | .pr_url = "https://example.test/pr/9013"
+    | .review_rework_attempts = 1
+    | .review_rework_limit = 3
+  ' "$REPO_DIR/.harness/tasks/issue-9013/task.json" > "$REPO_DIR/.harness/tasks/issue-9013/task.json.tmp"
+  mv "$REPO_DIR/.harness/tasks/issue-9013/task.json.tmp" "$REPO_DIR/.harness/tasks/issue-9013/task.json"
+  printf '{}
+' > "$REPO_DIR/.harness/state/claims.json"
+
+  output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once" --dispatch-only --assign-slot slot-r --assign-channel exec-r)
+  assert_eq "$output" "success: dispatched review rework issue #9013 -> exec-r/slot-r" "dispatch-only mode should assign queued rework instead of launching it locally"
+
+  claim_status=$(jq -r '"example/test-harness#9013" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_status" "assigned" "dispatch-only rework should leave the claim assigned"
+
+  worker_log=$(jq -r '"example/test-harness#9013" as $k | .[$k].worker_log // ""' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$worker_log" "" "dispatch-only rework should not launch the worker"
+
+  task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9013/task.json")
+  assert_eq "$task_status" "in_progress" "dispatch-only rework should move back to in_progress so assigned workers can resume it"
+
+  assignment_slot=$(jq -r '.assignment.slot // ""' "$REPO_DIR/.harness/tasks/issue-9013/task.json")
+  assert_eq "$assignment_slot" "slot-r" "dispatch-only rework should preserve the assigned slot"
+
+  assignment_channel=$(jq -r '.assignment.channel // ""' "$REPO_DIR/.harness/tasks/issue-9013/task.json")
+  assert_eq "$assignment_channel" "exec-r" "dispatch-only rework should preserve the assigned channel"
+
+  note=$(jq -r '.note // ""' "$REPO_DIR/.harness/tasks/issue-9013/task.json")
+  assert_contains "$note" "assigned to exec-r/slot-r" "dispatch-only rework note should mention the assignment target"
+}
+
 scenario_assigned_only_runs_preassigned_work() {
   local dispatch_output run_output status claim_count assignment_slot assignment_channel
 
@@ -623,6 +663,7 @@ scenario_recovers_stale_in_progress_task
 scenario_dispatch_only_records_assignment
 scenario_assigned_only_does_not_fetch_queue
 scenario_assigned_only_runs_preassigned_work
+scenario_dispatch_only_rework_stays_assigned
 scenario_blocks_stale_base_handoff
 
 printf 'check-task-run-once passed\n'
