@@ -309,6 +309,21 @@ find_assigned_pending_task() {
   return 1
 }
 
+find_running_active_task() {
+  local active_json="$1"
+  local task_json
+
+  while IFS= read -r task_json; do
+    [[ -n "$task_json" ]] || continue
+    if [[ "$(classify_active_task "$task_json")" == "running" ]]; then
+      printf '%s\n' "$task_json"
+      return 0
+    fi
+  done < <(printf '%s' "$active_json" | jq -c '.[]')
+
+  return 1
+}
+
 collect_changed_files() {
   local worktree="$1"
 
@@ -567,6 +582,14 @@ if [[ "$assigned_only" -eq 1 ]]; then
     fi
     reconcile_task "$reconcilable_task"
     exit $?
+  fi
+
+  if running_task=$(find_running_active_task "$assigned_tasks" 2>/dev/null); then
+    running_task_id=$(printf '%s' "$running_task" | jq -r '.task_id // ""')
+    waiting_detail="assignment $(assignment_ref) already has active work; task=$running_task_id; $assigned_summary_text"
+    emit_log "waiting" "assignment already busy" "" "$running_task_id" "$waiting_detail"
+    printf 'waiting: %s\n' "$waiting_detail"
+    exit 0
   fi
 
   if pending_task=$(find_assigned_pending_task "$assigned_tasks" 2>/dev/null); then

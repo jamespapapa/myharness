@@ -672,6 +672,41 @@ scenario_task_start_launch_marks_claim_running() {
   assert_eq "$claim_status" "in_progress" "direct task-start launches should mark the claim running before Codex starts"
 }
 
+scenario_assigned_only_waits_when_slot_busy() {
+  local dispatch_one dispatch_two run_output second_status first_claim_status second_claim_status
+
+  setup_fixture "assigned-busy"
+  write_mock_issue 9016 "Running assigned issue" '[{"name":"Ready"}]'
+  write_mock_issue 9017 "Pending assigned issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9016,"title":"Running assigned issue","labels":[{"name":"Ready"}]},{"number":9017,"title":"Pending assigned issue","labels":[{"name":"Ready"}]}]'
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_EXECUTOR_ACTIVE_LIMIT="2"
+EOF
+
+  dispatch_one=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once" --dispatch-only --assign-slot slot-z --assign-channel exec-z)
+  assert_eq "$dispatch_one" "success: dispatched issue #9016 -> exec-z/slot-z" "first dispatch should assign issue 9016"
+
+  dispatch_two=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once" --dispatch-only --assign-slot slot-z --assign-channel exec-z)
+  assert_eq "$dispatch_two" "success: dispatched issue #9017 -> exec-z/slot-z" "second dispatch should queue a second task for the same assignment when global capacity allows it"
+
+  jq '
+    ."example/test-harness#9016".status = "in_progress"
+  ' "$REPO_DIR/.harness/state/claims.json" > "$REPO_DIR/.harness/state/claims.json.tmp"
+  mv "$REPO_DIR/.harness/state/claims.json.tmp" "$REPO_DIR/.harness/state/claims.json"
+
+  run_output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once" --assigned-only --assign-slot slot-z --assign-channel exec-z)
+  assert_contains "$run_output" "assignment exec-z/slot-z already has active work; task=issue-9016" "assigned-only workers should refuse a second task while the assignment is already running"
+
+  first_claim_status=$(jq -r '"example/test-harness#9016" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$first_claim_status" "in_progress" "the running claim should stay in progress"
+
+  second_claim_status=$(jq -r '"example/test-harness#9017" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$second_claim_status" "assigned" "the queued second claim should remain assigned"
+
+  second_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9017/task.json")
+  assert_eq "$second_status" "in_progress" "the queued second task should not be launched while the slot is busy"
+}
+
 scenario_assigned_only_runs_preassigned_work() {
   local dispatch_output run_output status claim_count assignment_slot assignment_channel
 
