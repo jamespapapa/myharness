@@ -267,8 +267,139 @@ harness_release_batch_id() {
   printf '%s-to-%s-%s-%s\n' "$integration" "$release" "$stamp" "$RANDOM"
 }
 
+harness_active_changelog_relpath() {
+  printf 'CHANGELOG.md\n'
+}
+
+harness_release_changelog_relpath() {
+  local batch_id
+  batch_id="${1:?}"
+  printf 'artifacts/releases/%s.md\n' "$batch_id"
+}
+
+harness_active_changelog_path() {
+  printf '%s/%s\n' "$(harness_repo_root)" "$(harness_active_changelog_relpath)"
+}
+
+harness_release_changelog_path() {
+  local batch_id
+  batch_id="${1:?}"
+  printf '%s/%s\n' "$(harness_repo_root)" "$(harness_release_changelog_relpath "$batch_id")"
+}
+
+harness_active_changelog_batch_id() {
+  local changelog_file
+  changelog_file="${1:-$(harness_active_changelog_path)}"
+  [[ -f "$changelog_file" ]] || return 0
+  sed -n 's/^<!-- batch:\(.*\) -->$/\1/p' "$changelog_file" | head -n 1
+}
+
+harness_write_active_changelog_header() {
+  local batch_id started_at changelog_file
+  batch_id="$1"
+  started_at="$2"
+  changelog_file=$(harness_active_changelog_path)
+  cat >"$changelog_file" <<EOF
+# CHANGELOG
+
+<!-- batch:$batch_id -->
+Active integration batch: $HARNESS_INTEGRATION_BRANCH -> $HARNESS_RELEASE_BRANCH
+Started: $started_at
+
+EOF
+}
+
+harness_reset_active_changelog() {
+  local changelog_file
+  changelog_file=$(harness_active_changelog_path)
+  cat >"$changelog_file" <<EOF
+# CHANGELOG
+
+Active integration batch: $HARNESS_INTEGRATION_BRANCH -> $HARNESS_RELEASE_BRANCH
+No unreleased entries yet.
+
+EOF
+}
+
+harness_ensure_active_changelog() {
+  local batch_id started_at changelog_file current_batch
+  batch_id="$1"
+  started_at="${2:-$(harness_now_utc)}"
+  changelog_file=$(harness_active_changelog_path)
+  current_batch=$(harness_active_changelog_batch_id "$changelog_file" || true)
+  if [[ ! -f "$changelog_file" || "$current_batch" != "$batch_id" ]]; then
+    harness_write_active_changelog_header "$batch_id" "$started_at"
+  fi
+}
+
+harness_append_issue_to_active_changelog() {
+  local task_id issue_number pr_number pr_url merge_sha merged_at batch_id
+  local title changelog_file entry_marker merged_day
+  task_id="$1"
+  issue_number="$2"
+  pr_number="$3"
+  pr_url="$4"
+  merge_sha="$5"
+  merged_at="$6"
+  batch_id="$7"
+
+  title=$(harness_task_field "$task_id" '.title // ""' 2>/dev/null || true)
+  [[ -n "$title" ]] || title="Issue $issue_number"
+  harness_ensure_active_changelog "$batch_id" "$merged_at"
+  changelog_file=$(harness_active_changelog_path)
+  entry_marker="<!-- issue:$issue_number -->"
+  if grep -Fq "$entry_marker" "$changelog_file" 2>/dev/null; then
+    return 0
+  fi
+
+  merged_day="${merged_at%%T*}"
+  {
+    printf '%s\n' "$entry_marker"
+    printf -- '- %s · issue #%s · %s (PR #%s)\n' "$merged_day" "$issue_number" "$title" "$pr_number"
+  } >>"$changelog_file"
+}
+
+harness_archive_active_changelog() {
+  local batch_id released_at pr_number pr_url merge_sha
+  local active_file archive_file archive_relpath release_dir current_batch
+  batch_id="$1"
+  released_at="$2"
+  pr_number="$3"
+  pr_url="$4"
+  merge_sha="$5"
+
+  active_file=$(harness_active_changelog_path)
+  archive_relpath=$(harness_release_changelog_relpath "$batch_id")
+  archive_file=$(harness_release_changelog_path "$batch_id")
+  release_dir=$(dirname "$archive_file")
+  current_batch=$(harness_active_changelog_batch_id "$active_file" || true)
+  mkdir -p "$release_dir"
+
+  if [[ ! -f "$archive_file" ]]; then
+    cat >"$archive_file" <<EOF
+# Release Changelog
+
+- batch: $batch_id
+- integration: $HARNESS_INTEGRATION_BRANCH -> $HARNESS_RELEASE_BRANCH
+- released_at: $released_at
+- release_pr: $pr_url
+- release_pr_number: #$pr_number
+- release_merge_sha: $merge_sha
+
+EOF
+    if [[ -f "$active_file" && "$current_batch" == "$batch_id" ]]; then
+      cat "$active_file" >>"$archive_file"
+    else
+      printf '%s\n' '_No active CHANGELOG.md content was available for this batch._' >>"$archive_file"
+    fi
+  fi
+
+  harness_reset_active_changelog
+  printf '%s\n' "$archive_relpath"
+}
+
 harness_record_issue_in_active_release_batch() {
-  local task_id issue_number pr_number pr_url merge_sha merged_at release_file active_batch_id
+  local task_id issue_number pr_number pr_url merge_sha merged_at release_file active_batch_id active_changelog_path
   local status_file had_lock
   task_id="$1"
   issue_number="$2"
@@ -283,6 +414,7 @@ harness_record_issue_in_active_release_batch() {
   harness_acquire_lock
   release_file=$(harness_release_batches_path)
   active_batch_id=$(jq -r '.active_batch_id // ""' "$release_file")
+  active_changelog_path=$(harness_active_changelog_relpath)
 
   if [[ -z "$active_batch_id" || "$active_batch_id" == "null" ]]; then
     active_batch_id=$(harness_release_batch_id)
@@ -290,6 +422,7 @@ harness_record_issue_in_active_release_batch() {
       --arg batch_id "$active_batch_id" \
       --arg integration_branch "$HARNESS_INTEGRATION_BRANCH" \
       --arg release_branch "$HARNESS_RELEASE_BRANCH" \
+      --arg active_changelog_path "$active_changelog_path" \
       --arg created_at "$merged_at" '
         .integration_branch = $integration_branch
         | .release_branch = $release_branch
@@ -302,10 +435,12 @@ harness_record_issue_in_active_release_batch() {
             created_at: $created_at,
             window_start: $created_at,
             window_end: $created_at,
+            active_changelog_path: $active_changelog_path,
             released_at: null,
             release_pr_number: null,
             release_pr_url: null,
             release_merge_sha: null,
+            release_changelog_path: null,
             issues: []
           }]
       ' "$release_file" >"$release_file.tmp"
@@ -316,6 +451,7 @@ harness_record_issue_in_active_release_batch() {
     --arg batch_id "$active_batch_id" \
     --arg integration_branch "$HARNESS_INTEGRATION_BRANCH" \
     --arg release_branch "$HARNESS_RELEASE_BRANCH" \
+    --arg active_changelog_path "$active_changelog_path" \
     --arg task_id "$task_id" \
     --arg pr_url "$pr_url" \
     --arg merge_sha "$merge_sha" \
@@ -332,6 +468,7 @@ harness_record_issue_in_active_release_batch() {
                 .integration_branch = $integration_branch
                 | .release_branch = $release_branch
                 | .status = "active"
+                | .active_changelog_path = $active_changelog_path
                 | .window_start = (
                     if ((.window_start // "") | length) == 0 or $merged_at < .window_start
                     then $merged_at
@@ -355,10 +492,12 @@ harness_record_issue_in_active_release_batch() {
                               | .pr_url = $pr_url
                               | .merge_sha = $merge_sha
                               | .merged_at = $merged_at
+                              | .integration_changelog_path = $active_changelog_path
                               | .released_at = null
                               | .release_pr_number = null
                               | .release_pr_url = null
                               | .release_merge_sha = null
+                              | .release_changelog_path = null
                             else .
                             end
                           )
@@ -370,10 +509,12 @@ harness_record_issue_in_active_release_batch() {
                           pr_url: $pr_url,
                           merge_sha: $merge_sha,
                           merged_at: $merged_at,
+                          integration_changelog_path: $active_changelog_path,
                           released_at: null,
                           release_pr_number: null,
                           release_pr_url: null,
-                          release_merge_sha: null
+                          release_merge_sha: null,
+                          release_changelog_path: null
                         }]
                       end
                   )
@@ -389,14 +530,18 @@ harness_record_issue_in_active_release_batch() {
     jq \
       --arg batch_id "$active_batch_id" \
       --arg merged_at "$merged_at" \
-      --arg merge_sha "$merge_sha" '
+      --arg merge_sha "$merge_sha" \
+      --arg integration_changelog_path "$active_changelog_path" '
         .release_batch_id = $batch_id
         | .merged_to_integration_at = $merged_at
         | .integration_merge_sha = $merge_sha
-        | del(.released_to_main_at, .release_pr_url, .release_pr_number, .release_merge_sha)
+        | .integration_changelog_path = $integration_changelog_path
+        | del(.released_to_main_at, .release_pr_url, .release_pr_number, .release_merge_sha, .release_changelog_path)
       ' "$status_file" >"$status_file.tmp"
     mv "$status_file.tmp" "$status_file"
   fi
+
+  harness_append_issue_to_active_changelog "$task_id" "$issue_number" "$pr_number" "$pr_url" "$merge_sha" "$merged_at" "$active_batch_id"
 
   if [[ "$had_lock" != "1" ]]; then
     harness_release_lock
@@ -407,7 +552,7 @@ harness_record_issue_in_active_release_batch() {
 
 harness_promote_active_release_batch() {
   local task_id pr_number pr_url merge_sha released_at repo_slug
-  local release_file active_batch_id issue_numbers status_file had_lock
+  local release_file active_batch_id issue_numbers status_file had_lock release_changelog_path
   task_id="$1"
   pr_number="$2"
   pr_url="$3"
@@ -434,11 +579,13 @@ harness_promote_active_release_batch() {
     | select(.id == $batch_id)
     | .issues[]?.issue_number
   ' "$release_file")
+  release_changelog_path=$(harness_archive_active_changelog "$active_batch_id" "$released_at" "$pr_number" "$pr_url" "$merge_sha")
 
   jq \
     --arg batch_id "$active_batch_id" \
     --arg integration_branch "$HARNESS_INTEGRATION_BRANCH" \
     --arg release_branch "$HARNESS_RELEASE_BRANCH" \
+    --arg release_changelog_path "$release_changelog_path" \
     --arg released_at "$released_at" \
     --arg pr_url "$pr_url" \
     --arg merge_sha "$merge_sha" \
@@ -457,12 +604,14 @@ harness_promote_active_release_batch() {
                 | .release_pr_number = $pr_number
                 | .release_pr_url = $pr_url
                 | .release_merge_sha = $merge_sha
+                | .release_changelog_path = $release_changelog_path
                 | .issues = [
                     (.issues // [])[]
                     | .released_at = $released_at
                     | .release_pr_number = $pr_number
                     | .release_pr_url = $pr_url
                     | .release_merge_sha = $merge_sha
+                    | .release_changelog_path = $release_changelog_path
                   ]
               else .
               end
@@ -478,12 +627,14 @@ harness_promote_active_release_batch() {
       --arg pr_url "$pr_url" \
       --arg merge_sha "$merge_sha" \
       --arg batch_id "$active_batch_id" \
+      --arg release_changelog_path "$release_changelog_path" \
       --argjson pr_number "$pr_number" '
         .release_batch_id = $batch_id
         | .released_to_main_at = $released_at
         | .release_pr_url = $pr_url
         | .release_pr_number = $pr_number
         | .release_merge_sha = $merge_sha
+        | .release_changelog_path = $release_changelog_path
       ' "$status_file" >"$status_file.tmp"
     mv "$status_file.tmp" "$status_file"
   fi
