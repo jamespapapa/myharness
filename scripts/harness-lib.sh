@@ -1175,6 +1175,37 @@ harness_issue_numbers_with_task_status_json() {
   ' "${files[@]}"
 }
 
+harness_issue_numbers_with_task_statuses_json() {
+  local statuses_json
+  local -a statuses
+  statuses=("$@")
+
+  if [[ "${#statuses[@]}" -eq 0 ]]; then
+    printf '[]\n'
+    return 0
+  fi
+
+  harness_load_project_env
+  shopt -s nullglob
+  local files=("$HARNESS_TASK_DIR"/*/task.json)
+  shopt -u nullglob
+  if [[ "${#files[@]}" -eq 0 ]]; then
+    printf '[]\n'
+    return 0
+  fi
+
+  statuses_json=$(printf '%s\n' "${statuses[@]}" | jq -R . | jq -s .)
+
+  jq -s --argjson statuses "$statuses_json" '
+    map(
+      select((.status // "") as $status | ($statuses | index($status)) != null)
+      | select((.issue_number // null) != null)
+      | .issue_number
+    )
+    | unique
+  ' "${files[@]}"
+}
+
 harness_artifact_dir() {
   local kind task_id
   kind="$1"

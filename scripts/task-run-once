@@ -171,9 +171,13 @@ active_tasks_json() {
 
   snapshots=()
   for task_json in "${task_files[@]}"; do
-    if [[ "$(jq -r '.status // ""' "$task_json")" != "in_progress" ]]; then
-      continue
-    fi
+    case "$(jq -r '.status // ""' "$task_json")" in
+      assigned|in_progress)
+        ;;
+      *)
+        continue
+        ;;
+    esac
     task_id=$(jq -r '.task_id' "$task_json")
     snapshots+=("$(task_snapshot_by_id "$task_id")")
   done
@@ -279,6 +283,24 @@ active_summary() {
     "$assigned" "$running" "$reconciling" "$total" "$HARNESS_EXECUTOR_ACTIVE_LIMIT"
 }
 
+active_limit_count() {
+  local active_json="$1"
+  local task_json state total
+
+  total=0
+  while IFS= read -r task_json; do
+    [[ -n "$task_json" ]] || continue
+    state=$(classify_active_task "$task_json")
+    case "$state" in
+      running|reconciling)
+        total=$((total + 1))
+        ;;
+    esac
+  done < <(printf '%s' "$active_json" | jq -c '.[]')
+
+  printf '%s\n' "$total"
+}
+
 find_reconcilable_active_task() {
   local active_json="$1"
   local task_json
@@ -377,7 +399,7 @@ reconcile_task() {
           harness_remove_claim "$claim_key"
         fi
         ;;
-      in_progress|created|unknown)
+      assigned|in_progress|created|unknown)
         changed_files=()
         while IFS= read -r changed_file; do
           [[ -n "$changed_file" ]] || continue
@@ -515,6 +537,7 @@ launch_worker_for_task() {
   fi
 
   emit_log "claimed" "$launch_message" "$issue_number" "$task_id" "$title"
+  harness_update_task_status "$task_id" "in_progress"
   harness_update_claim_status "$claim_key" "in_progress" "executor running" "$worker_log"
 
   worker_prompt=$(cat <<EOF
@@ -580,7 +603,8 @@ EOF
 }
 
 active_tasks=$(active_tasks_json)
-active_total=$(printf '%s' "$active_tasks" | jq 'length')
+tracked_total=$(printf '%s' "$active_tasks" | jq 'length')
+active_limit_total=$(active_limit_count "$active_tasks")
 active_summary_text=$(active_summary "$active_tasks")
 
 if [[ "$assigned_only" -eq 1 ]]; then
@@ -654,7 +678,7 @@ if [[ -n "$next_rework_task" ]]; then
   rework_issue_number=$(printf '%s' "$next_rework_task" | jq -r '.issue_number // ""')
   rework_task_id=$(printf '%s' "$next_rework_task" | jq -r '.task_id')
   rework_title=$(printf '%s' "$next_rework_task" | jq -r '.title')
-  if (( active_total >= HARNESS_EXECUTOR_ACTIVE_LIMIT )); then
+  if (( active_limit_total >= HARNESS_EXECUTOR_ACTIVE_LIMIT )); then
     waiting_detail="active limit reached before resuming review rework for $rework_task_id; $active_summary_text"
     emit_log "waiting" "active limit reached before rework" "$rework_issue_number" "$rework_task_id" "$waiting_detail"
     printf 'waiting: %s\n' "$waiting_detail"
@@ -679,7 +703,7 @@ if [[ -n "$next_rework_task" ]]; then
   if [[ "$dispatch_only" -eq 1 ]]; then
     harness_set_task_assignment "$rework_task_id" "$assignment_slot" "$assignment_channel" "$assigned_by"
     harness_write_claim "$claim_key" "$repo_slug" "$rework_issue_number" "$rework_task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "assigned" "$assignment_slot" "$assignment_channel" "$assigned_by"
-    harness_update_task_status "$rework_task_id" "in_progress" "automatic review rework attempt $rework_attempts of $rework_limit assigned to $(assignment_ref)" "$pr_url"
+    harness_update_task_status "$rework_task_id" "assigned" "automatic review rework attempt $rework_attempts of $rework_limit assigned to $(assignment_ref)" "$pr_url"
     harness_record_stage_summary "$rework_task_id" "executor" "started" "Executor assigned automatic review rework attempt $rework_attempts of $rework_limit to $(assignment_ref) without launching it locally." "$pr_url"
     dispatch_detail="assigned review rework issue #$rework_issue_number to $(assignment_ref)"
     emit_log "success" "dispatched review rework to assignment" "$rework_issue_number" "$rework_task_id" "$dispatch_detail"
@@ -697,7 +721,7 @@ fi
 
 if ! next_output=$(next_issue_json 2>&1); then
   if [[ "$next_output" == *"no eligible issue found"* ]]; then
-    if [[ "$active_total" -gt 0 ]]; then
+    if [[ "$tracked_total" -gt 0 ]]; then
       waiting_detail="ready queue empty; active work still assigned/running/reconciling; $active_summary_text"
       emit_log "waiting" "ready queue empty but active work remains" "" "" "$waiting_detail"
       printf 'waiting: %s\n' "$waiting_detail"
@@ -719,7 +743,7 @@ issue_number=$(printf '%s' "$next_output" | jq -r '.number')
 title=$(printf '%s' "$next_output" | jq -r '.title')
 task_id="issue-$issue_number"
 
-if (( active_total >= HARNESS_EXECUTOR_ACTIVE_LIMIT )); then
+if (( active_limit_total >= HARNESS_EXECUTOR_ACTIVE_LIMIT )); then
   waiting_detail="active limit reached before claiming issue #$issue_number; $active_summary_text"
   emit_log "waiting" "active limit reached before claim" "$issue_number" "$task_id" "$waiting_detail"
   printf 'waiting: %s\n' "$waiting_detail"

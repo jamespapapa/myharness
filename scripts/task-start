@@ -110,9 +110,11 @@ if [[ -n "$issue_number" ]]; then
   fi
   if harness_task_exists "$task_id"; then
     existing_status=$(harness_task_field "$task_id" '.status // ""')
-    if [[ "$existing_status" == "in_progress" ]]; then
-      harness_die "issue already has active task: $task_id"
-    fi
+    case "$existing_status" in
+      assigned|in_progress)
+        harness_die "issue already has active task: $task_id"
+        ;;
+    esac
   fi
 else
   claim_key=$(harness_claim_key "" "" "$task_id")
@@ -150,14 +152,14 @@ assignment_label="$assignment_channel/$assignment_slot"
 
 if [[ -n "$issue_number" ]]; then
   harness_write_claim "$claim_key" "$repo_slug" "$issue_number" "$task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "assigned" "$assignment_slot" "$assignment_channel" "$assigned_by"
-  harness_update_task_status "$task_id" "in_progress"
+  harness_update_task_status "$task_id" "assigned"
   harness_record_stage_summary "$task_id" "claim" "started" "Claim started, assigned the task to $assignment_label, and created the isolated task workspace on branch $branch."
   if harness_can_sync_github; then
     harness_issue_started "$repo_slug" "$issue_number" "$task_id" "$branch" "$worktree"
   fi
 else
   harness_write_claim "$claim_key" "" "" "$task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "assigned" "$assignment_slot" "$assignment_channel" "$assigned_by"
-  harness_update_task_status "$task_id" "in_progress"
+  harness_update_task_status "$task_id" "assigned"
   harness_record_stage_summary "$task_id" "claim" "started" "Claim started, assigned the task to $assignment_label, and created the isolated task workspace on branch $branch."
 fi
 
@@ -175,6 +177,7 @@ printf 'OpenClaw task command:\n'
 printf '  cd %q && openclaw\n' "$openclaw_session"
 
 if [[ "$launch" == "codex" ]]; then
+  harness_update_task_status "$task_id" "in_progress"
   harness_update_claim_status "$claim_key" "in_progress" "task-start launched Codex directly"
   harness_notice "launching Codex in $codex_session"
   finish_script="$(harness_repo_root)/scripts/task-finish"

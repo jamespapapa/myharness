@@ -174,7 +174,7 @@ case "${HARNESS_MOCK_CODEX_MODE:-touch-readme}" in
     git -C "$repo_dir" checkout -q main
     ;;
   sleep-touch-readme)
-    sleep 2
+    sleep 1
     printf '\nACP reconcile proof from mock codex.\n' >>README.md
     ;;
   no-op)
@@ -479,6 +479,40 @@ EOF
   assert_contains "$output" "issue already has active task: issue-9021" "task-start should use the local task file as a duplicate guard when claims.json is stale"
 }
 
+scenario_task_start_rejects_local_assigned_without_claim() {
+  local now_iso output
+
+  setup_fixture "start-local-assigned"
+  now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  mkdir -p "$REPO_DIR/.harness/tasks/issue-9023" "$WORKTREE_ROOT/issue-9023"
+
+  cat >"$REPO_DIR/.harness/tasks/issue-9023/task.json" <<EOF
+{
+  "task_id": "issue-9023",
+  "issue_number": 9023,
+  "title": "Locally assigned issue",
+  "repo_slug": "example/test-harness",
+  "branch": "fix/issue-9023",
+  "base_branch": "dev",
+  "worktree": "$WORKTREE_ROOT/issue-9023",
+  "status": "assigned",
+  "created_at": "$now_iso",
+  "updated_at": "$now_iso"
+}
+EOF
+
+  mkdir -p "$REPO_DIR/.harness/state"
+  printf '{}\n' > "$REPO_DIR/.harness/state/claims.json"
+  write_mock_issue 9023 "Locally assigned issue" '[{"name":"Ready"}]'
+
+  if output=$(task_env "$REPO_DIR/scripts/task-start" --issue 9023 2>&1); then
+    printf 'task-start should reject duplicate launches when a local assigned task already exists\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$output" "issue already has active task: issue-9023" "task-start should use local assigned tasks as a duplicate guard when claims.json is stale"
+}
+
 scenario_task_next_skips_local_in_progress_without_claim() {
   local now_epoch now_iso output
 
@@ -513,6 +547,41 @@ EOF
   fi
 
   assert_contains "$output" "no eligible issue found" "task-next should ignore issues with a local in_progress task record"
+}
+
+scenario_task_next_skips_local_assigned_without_claim() {
+  local now_iso output
+
+  setup_fixture "next-local-assigned"
+  now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  mkdir -p "$REPO_DIR/.harness/tasks/issue-9024" "$WORKTREE_ROOT/issue-9024"
+
+  cat >"$REPO_DIR/.harness/tasks/issue-9024/task.json" <<EOF
+{
+  "task_id": "issue-9024",
+  "issue_number": 9024,
+  "title": "Locally assigned queued issue",
+  "repo_slug": "example/test-harness",
+  "branch": "fix/issue-9024",
+  "base_branch": "dev",
+  "worktree": "$WORKTREE_ROOT/issue-9024",
+  "status": "assigned",
+  "created_at": "$now_iso",
+  "updated_at": "$now_iso"
+}
+EOF
+
+  mkdir -p "$REPO_DIR/.harness/state"
+  printf '{}\n' > "$REPO_DIR/.harness/state/claims.json"
+  write_mock_issue 9024 "Locally assigned queued issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9024,"title":"Locally assigned queued issue","labels":[{"name":"Ready"}]}]'
+
+  if output=$(task_env "$REPO_DIR/scripts/task-next" 2>&1); then
+    printf 'task-next should skip issues that already have a local assigned task even when claims.json is empty\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$output" "no eligible issue found" "task-next should ignore issues with a local assigned task record"
 }
 
 scenario_waits_when_queue_empty_but_active_work_remains() {
@@ -619,7 +688,7 @@ EOF
 }
 
 scenario_dispatch_only_records_assignment() {
-  local output claim_status assignment_slot assignment_channel assigned_by worker_log claim_summary
+  local output claim_status task_status assignment_slot assignment_channel assigned_by worker_log claim_summary
 
   setup_fixture "dispatch-only"
   write_mock_issue 9010 "Dispatch only issue" '[{"name":"Ready"}]'
@@ -630,6 +699,9 @@ scenario_dispatch_only_records_assignment() {
 
   claim_status=$(jq -r '."example/test-harness#9010".status' "$REPO_DIR/.harness/state/claims.json")
   assert_eq "$claim_status" "assigned" "dispatch-only should leave the claim in assigned status"
+
+  task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9010/task.json")
+  assert_eq "$task_status" "assigned" "dispatch-only should leave the task assigned until a worker starts it"
 
   assignment_slot=$(jq -r '.assignment.slot // ""' "$REPO_DIR/.harness/tasks/issue-9010/task.json")
   assert_eq "$assignment_slot" "slot-a" "task record should store the assigned slot"
@@ -691,7 +763,7 @@ scenario_dispatch_only_rework_stays_assigned() {
   assert_eq "$worker_log" "" "dispatch-only rework should not launch the worker"
 
   task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9013/task.json")
-  assert_eq "$task_status" "in_progress" "dispatch-only rework should move back to in_progress so assigned workers can resume it"
+  assert_eq "$task_status" "assigned" "dispatch-only rework should stay assigned until the designated worker resumes it"
 
   assignment_slot=$(jq -r '.assignment.slot // ""' "$REPO_DIR/.harness/tasks/issue-9013/task.json")
   assert_eq "$assignment_slot" "slot-r" "dispatch-only rework should preserve the assigned slot"
@@ -787,7 +859,7 @@ EOF
 }
 
 scenario_task_start_launch_marks_claim_running() {
-  local claim_status
+  local claim_status task_status
 
   setup_fixture "task-start-launch"
   write_mock_issue 9015 "Direct launch claim status" '[{"name":"Ready"}]'
@@ -797,6 +869,9 @@ scenario_task_start_launch_marks_claim_running() {
 
   claim_status=$(jq -r '"example/test-harness#9015" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
   assert_eq "$claim_status" "in_progress" "direct task-start launches should mark the claim running before Codex starts"
+
+  task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9015/task.json")
+  assert_eq "$task_status" "in_progress" "direct task-start launches should mark the task in progress before Codex starts"
 }
 
 scenario_assigned_launch_refreshes_claim_timestamp() {
@@ -883,7 +958,7 @@ EOF
   assert_eq "$second_claim_status" "assigned" "the queued second claim should remain assigned"
 
   second_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9017/task.json")
-  assert_eq "$second_status" "in_progress" "the queued second task should not be launched while the slot is busy"
+  assert_eq "$second_status" "assigned" "the queued second task should remain assigned while the slot is busy"
 }
 
 scenario_assigned_only_runs_preassigned_work() {
@@ -917,7 +992,9 @@ scenario_claim_and_reconcile_to_pr_open
 scenario_waits_when_active_limit_is_full
 scenario_task_start_rechecks_active_limit_under_lock
 scenario_task_start_rejects_local_in_progress_without_claim
+scenario_task_start_rejects_local_assigned_without_claim
 scenario_task_next_skips_local_in_progress_without_claim
+scenario_task_next_skips_local_assigned_without_claim
 scenario_waits_when_queue_empty_but_active_work_remains
 scenario_recovers_stale_in_progress_task
 scenario_dispatch_only_records_assignment

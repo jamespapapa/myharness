@@ -43,7 +43,7 @@ if [[ -z "$label_filter" ]]; then
 fi
 repo=$(harness_repo_slug)
 claimed=$(harness_claimed_issue_numbers_json "$repo")
-active_tasks=$(harness_issue_numbers_with_task_status_json "in_progress")
+active_tasks=$(harness_issue_numbers_with_task_statuses_json "assigned" "in_progress")
 
 issues=$(gh api "repos/$repo/issues?state=open&per_page=$limit&sort=created&direction=asc")
 
