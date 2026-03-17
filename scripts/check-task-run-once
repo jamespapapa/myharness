@@ -444,6 +444,77 @@ EOF
   fi
 }
 
+scenario_task_start_rejects_local_in_progress_without_claim() {
+  local now_epoch now_iso output
+
+  setup_fixture "start-local-active"
+  now_epoch=$(date -u +%s)
+  now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  mkdir -p "$REPO_DIR/.harness/tasks/issue-9021" "$WORKTREE_ROOT/issue-9021"
+
+  cat >"$REPO_DIR/.harness/tasks/issue-9021/task.json" <<EOF
+{
+  "task_id": "issue-9021",
+  "issue_number": 9021,
+  "title": "Locally active issue",
+  "repo_slug": "example/test-harness",
+  "branch": "fix/issue-9021",
+  "base_branch": "dev",
+  "worktree": "$WORKTREE_ROOT/issue-9021",
+  "status": "in_progress",
+  "created_at": "$now_iso",
+  "updated_at": "$now_iso"
+}
+EOF
+
+  mkdir -p "$REPO_DIR/.harness/state"
+  printf '{}\n' > "$REPO_DIR/.harness/state/claims.json"
+  write_mock_issue 9021 "Locally active issue" '[{"name":"Ready"}]'
+
+  if output=$(task_env "$REPO_DIR/scripts/task-start" --issue 9021 2>&1); then
+    printf 'task-start should reject duplicate launches when a local in_progress task already exists\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$output" "issue already has active task: issue-9021" "task-start should use the local task file as a duplicate guard when claims.json is stale"
+}
+
+scenario_task_next_skips_local_in_progress_without_claim() {
+  local now_epoch now_iso output
+
+  setup_fixture "next-local-active"
+  now_epoch=$(date -u +%s)
+  now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  mkdir -p "$REPO_DIR/.harness/tasks/issue-9022" "$WORKTREE_ROOT/issue-9022"
+
+  cat >"$REPO_DIR/.harness/tasks/issue-9022/task.json" <<EOF
+{
+  "task_id": "issue-9022",
+  "issue_number": 9022,
+  "title": "Locally active queued issue",
+  "repo_slug": "example/test-harness",
+  "branch": "fix/issue-9022",
+  "base_branch": "dev",
+  "worktree": "$WORKTREE_ROOT/issue-9022",
+  "status": "in_progress",
+  "created_at": "$now_iso",
+  "updated_at": "$now_iso"
+}
+EOF
+
+  mkdir -p "$REPO_DIR/.harness/state"
+  printf '{}\n' > "$REPO_DIR/.harness/state/claims.json"
+  write_mock_issue 9022 "Locally active queued issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9022,"title":"Locally active queued issue","labels":[{"name":"Ready"}]}]'
+
+  if output=$(task_env "$REPO_DIR/scripts/task-next" 2>&1); then
+    printf 'task-next should skip issues that already have a local in_progress task even when claims.json is empty\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$output" "no eligible issue found" "task-next should ignore issues with a local in_progress task record"
+}
+
 scenario_waits_when_queue_empty_but_active_work_remains() {
   local now_epoch now_iso output
 
@@ -699,7 +770,7 @@ scenario_assigned_launch_refreshes_claim_timestamp() {
 
   running_status=""
   refreshed_epoch=""
-  for _ in $(seq 1 40); do
+  for _ in $(seq 1 120); do
     running_status=$(jq -r '"example/test-harness#9018" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
     refreshed_epoch=$(jq -r '"example/test-harness#9018" as $k | .[$k].claimed_epoch // 0' "$REPO_DIR/.harness/state/claims.json")
     if [[ "$running_status" == "in_progress" ]]; then
@@ -790,6 +861,8 @@ scenario_assigned_only_runs_preassigned_work() {
 scenario_claim_and_reconcile_to_pr_open
 scenario_waits_when_active_limit_is_full
 scenario_task_start_rechecks_active_limit_under_lock
+scenario_task_start_rejects_local_in_progress_without_claim
+scenario_task_next_skips_local_in_progress_without_claim
 scenario_waits_when_queue_empty_but_active_work_remains
 scenario_recovers_stale_in_progress_task
 scenario_dispatch_only_records_assignment

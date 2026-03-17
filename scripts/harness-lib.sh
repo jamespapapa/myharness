@@ -1156,6 +1156,25 @@ harness_count_tasks_by_status() {
   ' "${files[@]}"
 }
 
+harness_issue_numbers_with_task_status_json() {
+  local status
+  status="$1"
+
+  harness_load_project_env
+  shopt -s nullglob
+  local files=("$HARNESS_TASK_DIR"/*/task.json)
+  shopt -u nullglob
+  if [[ "${#files[@]}" -eq 0 ]]; then
+    printf '[]\n'
+    return 0
+  fi
+
+  jq -s --arg status "$status" '
+    map(select(.status == $status and (.issue_number // null) != null) | .issue_number)
+    | unique
+  ' "${files[@]}"
+}
+
 harness_artifact_dir() {
   local kind task_id
   kind="$1"

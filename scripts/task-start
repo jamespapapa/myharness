@@ -108,6 +108,12 @@ if [[ -n "$issue_number" ]]; then
   if jq -e --arg key "$claim_key" 'has($key)' "$HARNESS_CLAIMS_FILE" >/dev/null 2>&1; then
     harness_die "issue is already claimed: $claim_key"
   fi
+  if harness_task_exists "$task_id"; then
+    existing_status=$(harness_task_field "$task_id" '.status // ""')
+    if [[ "$existing_status" == "in_progress" ]]; then
+      harness_die "issue already has active task: $task_id"
+    fi
+  fi
 else
   claim_key=$(harness_claim_key "" "" "$task_id")
   if jq -e --arg key "$claim_key" 'has($key)' "$HARNESS_CLAIMS_FILE" >/dev/null 2>&1; then
