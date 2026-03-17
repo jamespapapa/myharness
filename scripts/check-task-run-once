@@ -173,6 +173,10 @@ case "${HARNESS_MOCK_CODEX_MODE:-touch-readme}" in
     git -C "$repo_dir" push origin dev >/dev/null 2>&1
     git -C "$repo_dir" checkout -q main
     ;;
+  sleep-touch-readme)
+    sleep 2
+    printf '\nACP reconcile proof from mock codex.\n' >>README.md
+    ;;
   no-op)
     ;;
   *)
@@ -672,6 +676,55 @@ scenario_task_start_launch_marks_claim_running() {
   assert_eq "$claim_status" "in_progress" "direct task-start launches should mark the claim running before Codex starts"
 }
 
+scenario_assigned_launch_refreshes_claim_timestamp() {
+  local stale_epoch stale_iso pid running_status refreshed_epoch output final_status claim_count
+
+  setup_fixture "assigned-launch-refresh"
+  write_mock_issue 9018 "Assigned launch refreshes claim timestamp" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9018,"title":"Assigned launch refreshes claim timestamp","labels":[{"name":"Ready"}]}]'
+
+  task_env "$REPO_DIR/scripts/task-start" --issue 9018 --assign-slot slot-r2 --assign-channel exec-r2 >/dev/null
+
+  stale_epoch=$(( $(date -u +%s) - 7200 ))
+  stale_iso=$(date -u -r "$stale_epoch" +"%Y-%m-%dT%H:%M:%SZ")
+  jq --arg claimed_at "$stale_iso" --argjson claimed_epoch "$stale_epoch" '
+    ."example/test-harness#9018".claimed_at = $claimed_at
+    | ."example/test-harness#9018".claimed_epoch = $claimed_epoch
+  ' "$REPO_DIR/.harness/state/claims.json" > "$REPO_DIR/.harness/state/claims.json.tmp"
+  mv "$REPO_DIR/.harness/state/claims.json.tmp" "$REPO_DIR/.harness/state/claims.json"
+
+  write_issue_list '[]'
+  task_env HARNESS_MOCK_CODEX_MODE="sleep-touch-readme" "$REPO_DIR/scripts/task-run-once" --assigned-only --assign-slot slot-r2 --assign-channel exec-r2 >"$FIXTURE_DIR/assigned-launch-refresh.out" 2>&1 &
+  pid=$!
+
+  running_status=""
+  refreshed_epoch=""
+  for _ in $(seq 1 40); do
+    running_status=$(jq -r '"example/test-harness#9018" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
+    refreshed_epoch=$(jq -r '"example/test-harness#9018" as $k | .[$k].claimed_epoch // 0' "$REPO_DIR/.harness/state/claims.json")
+    if [[ "$running_status" == "in_progress" ]]; then
+      break
+    fi
+    sleep 0.1
+  done
+
+  assert_eq "$running_status" "in_progress" "assigned-only launch should flip the claim into running state before the worker exits"
+  if [[ "$refreshed_epoch" -le "$stale_epoch" ]]; then
+    printf 'assert failed: running claim timestamp was not refreshed on launch\nold=%s new=%s\n' "$stale_epoch" "$refreshed_epoch" >&2
+    exit 1
+  fi
+
+  wait "$pid"
+  output=$(cat "$FIXTURE_DIR/assigned-launch-refresh.out")
+  assert_eq "$output" "success: reconciled issue #9018 -> PR https://example.test/pr/9018" "assigned-only launch should still reconcile cleanly after refreshing the running claim timestamp"
+
+  final_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9018/task.json")
+  assert_eq "$final_status" "pr_open" "assigned launch refresh scenario should reconcile to pr_open"
+
+  claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_count" "0" "claim should be cleared after assigned launch reconciliation"
+}
+
 scenario_assigned_only_waits_when_slot_busy() {
   local dispatch_one dispatch_two run_output second_status first_claim_status second_claim_status
 
@@ -745,6 +798,7 @@ scenario_assigned_only_runs_preassigned_work
 scenario_dispatch_only_rework_stays_assigned
 scenario_assigned_claim_expires_to_requeue
 scenario_task_start_launch_marks_claim_running
+scenario_assigned_launch_refreshes_claim_timestamp
 scenario_assigned_only_waits_when_slot_busy
 scenario_blocks_stale_base_handoff
 

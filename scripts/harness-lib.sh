@@ -945,6 +945,7 @@ harness_update_claim_status() {
           .status = $status
           | .updated_at = $updated_at
           | .updated_epoch = $updated_epoch
+          | if $status == "in_progress" then .claimed_at = $updated_at | .claimed_epoch = $updated_epoch else . end
           | if ($note | length) > 0 then .note = $note else . end
           | if ($worker_log | length) > 0 then .worker_log = $worker_log else . end
           | if ($worker_exit | length) > 0 then .worker_exit = $worker_exit else . end
