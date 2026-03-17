@@ -10,6 +10,7 @@
     "scripts/harness-lib.sh",
     "scripts/task-control-room-once",
     "scripts/task-create",
+    "scripts/task-next",
     "scripts/task-run-once",
     "scripts/task-start"
   ],
