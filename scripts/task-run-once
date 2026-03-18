@@ -337,7 +337,7 @@ find_explicit_running_task() {
 
   while IFS= read -r task_json; do
     [[ -n "$task_json" ]] || continue
-    if [[ "$(printf '%s' "$task_json" | jq -r '.claim_status // ""')" == "in_progress" ]]; then
+    if [[ "$(classify_active_task "$task_json")" == "running" ]]; then
       printf '%s\n' "$task_json"
       return 0
     fi

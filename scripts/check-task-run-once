@@ -926,6 +926,42 @@ EOF
   assert_eq "$claim_count" "0" "claim should be cleared after assigned launch reconciliation"
 }
 
+scenario_assigned_only_reconciles_stale_in_progress_task() {
+  local stale_epoch stale_iso run_output task_status claim_count worktree
+
+  setup_fixture "assigned-stale-running"
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_EXECUTOR_TIMEOUT_SECONDS="1"
+EOF
+  write_mock_issue 9020 "Assigned stale running issue" '[{"name":"Ready"}]'
+  write_issue_list '[]'
+
+  task_env "$REPO_DIR/scripts/task-start" --issue 9020 --assign-slot slot-s --assign-channel exec-s >/dev/null
+  worktree=$(jq -r '.worktree' "$REPO_DIR/.harness/tasks/issue-9020/task.json")
+  printf '\nStale assigned worker change.\n' >>"$worktree/README.md"
+
+  jq '.status = "in_progress"' "$REPO_DIR/.harness/tasks/issue-9020/task.json" > "$REPO_DIR/.harness/tasks/issue-9020/task.json.tmp"
+  mv "$REPO_DIR/.harness/tasks/issue-9020/task.json.tmp" "$REPO_DIR/.harness/tasks/issue-9020/task.json"
+
+  stale_epoch=$(( $(date -u +%s) - 7200 ))
+  stale_iso=$(date -u -r "$stale_epoch" +"%Y-%m-%dT%H:%M:%SZ")
+  jq --arg claimed_at "$stale_iso" --argjson claimed_epoch "$stale_epoch" '
+    ."example/test-harness#9020".status = "in_progress"
+    | ."example/test-harness#9020".claimed_at = $claimed_at
+    | ."example/test-harness#9020".claimed_epoch = $claimed_epoch
+  ' "$REPO_DIR/.harness/state/claims.json" > "$REPO_DIR/.harness/state/claims.json.tmp"
+  mv "$REPO_DIR/.harness/state/claims.json.tmp" "$REPO_DIR/.harness/state/claims.json"
+
+  run_output=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once" --assigned-only --assign-slot slot-s --assign-channel exec-s)
+  assert_eq "$run_output" "success: reconciled issue #9020 -> PR https://example.test/pr/9020" "assigned-only mode should reconcile a stale running claim before declaring the slot busy"
+
+  task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9020/task.json")
+  assert_eq "$task_status" "pr_open" "stale assigned running work should reconcile to pr_open"
+
+  claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_count" "0" "stale assigned running claims should be cleared after reconciliation"
+}
+
 scenario_assigned_only_waits_when_slot_busy() {
   local dispatch_one dispatch_two run_output second_status first_claim_status second_claim_status
 
@@ -935,6 +971,7 @@ scenario_assigned_only_waits_when_slot_busy() {
   write_issue_list '[{"number":9016,"title":"Running assigned issue","labels":[{"name":"Ready"}]},{"number":9017,"title":"Pending assigned issue","labels":[{"name":"Ready"}]}]'
   cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
 HARNESS_EXECUTOR_ACTIVE_LIMIT="2"
+HARNESS_EXECUTOR_TIMEOUT_SECONDS="600"
 EOF
 
   dispatch_one=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once" --dispatch-only --assign-slot slot-z --assign-channel exec-z)
@@ -1005,6 +1042,7 @@ scenario_stale_dispatch_rework_returns_to_rework
 scenario_assigned_claim_expires_to_requeue
 scenario_task_start_launch_marks_claim_running
 scenario_assigned_launch_refreshes_claim_timestamp
+scenario_assigned_only_reconciles_stale_in_progress_task
 scenario_assigned_only_waits_when_slot_busy
 scenario_blocks_stale_base_handoff
 
