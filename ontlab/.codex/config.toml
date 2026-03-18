@@ -1,0 +1,35 @@
+[features]
+multi_agent = true
+child_agents_md = true
+
+[agents.repo_sampler]
+description = "Ranks target/seed scopes and chooses high-signal cycle candidates"
+config_file = "/Users/jules/Desktop/work/ontlab/.codex/agents/repo_sampler.toml"
+
+[agents.ontology_instance_builder]
+description = "Inspects target repos and drafts ontology-instance build evidence without contaminating seed facts"
+config_file = "/Users/jules/Desktop/work/ontlab/.codex/agents/ontology_instance_builder.toml"
+
+[agents.qa_designer]
+description = "Designs target-repo question sets, eval checks, and abstention-aware prompts"
+config_file = "/Users/jules/Desktop/work/ontlab/.codex/agents/qa_designer.toml"
+
+[agents.answer_gap_critic]
+description = "Buckets answer failures into fixable system gaps and proposes the next smallest safe change"
+config_file = "/Users/jules/Desktop/work/ontlab/.codex/agents/answer_gap_critic.toml"
+
+[agents.evaluator]
+description = "Scores answers and compares before/after metrics without editing source files"
+config_file = "/Users/jules/Desktop/work/ontlab/.codex/agents/evaluator.toml"
+
+[agents.pack_patcher]
+description = "Implements one smallest safe pack/retrieval/rubric/suppression patch inside an isolated worktree"
+config_file = "/Users/jules/Desktop/work/ontlab/.codex/agents/pack_patcher.toml"
+
+[agents.seed_regression_runner]
+description = "Runs seed regression checks and reports deltas without changing code"
+config_file = "/Users/jules/Desktop/work/ontlab/.codex/agents/seed_regression_runner.toml"
+
+[agents.promoter]
+description = "Single-promoter role for fan-in, promotion decisions, and merge gating"
+config_file = "/Users/jules/Desktop/work/ontlab/.codex/agents/promoter.toml"

@@ -1,0 +1,61 @@
+{
+  "generated_at": "2026-03-18T07:49:32Z",
+  "root": "/Users/jules/Desktop/work/ontlab/cycle_runs",
+  "cycles": [
+    {
+      "cycle_id": "2026-03-18T07-37-13Z__missing-isolated-cycle-orchestration",
+      "cycle_dir": "cycle_runs/2026-03-18T07-37-13Z__missing-isolated-cycle-orchestration",
+      "target": "instances/my-target-repo",
+      "status": "completed",
+      "decision": "defer",
+      "selected_gap": "missing isolated cycle orchestration",
+      "before_score": 0,
+      "after_score": 5,
+      "score_delta": 5.0,
+      "seed_regression_pass": true,
+      "conflict_keys": [
+        "file:AGENTS.md",
+        "file:README.ko.md",
+        "pack:harness-orchestration",
+        "file:ARCHITECTURE.ko.md",
+        "file:.codex/config.toml",
+        "file:scripts/init_cycle_run.py",
+        "file:scripts/log_cycle_event.py",
+        "file:scripts/plan_cycle_batch.py",
+        "file:scripts/fanin_cycle_results.py",
+        "file:.codex/README.md",
+        "file:cycle_runs/README.md",
+        "file:prompts/cycle_runner_prompt_ko.md",
+        "file:prompts/promoter_prompt_ko.md",
+        "file:reports/templates/cycle_report.md",
+        "file:scripts/structured_io.py"
+      ],
+      "changed_files": [
+        "AGENTS.md",
+        "README.ko.md",
+        "ARCHITECTURE.ko.md",
+        ".codex/config.toml",
+        "scripts/init_cycle_run.py",
+        "scripts/log_cycle_event.py",
+        "scripts/plan_cycle_batch.py",
+        "scripts/fanin_cycle_results.py",
+        ".codex/README.md",
+        "cycle_runs/README.md",
+        "prompts/cycle_runner_prompt_ko.md",
+        "prompts/promoter_prompt_ko.md",
+        "reports/templates/cycle_report.md",
+        "scripts/structured_io.py"
+      ]
+    }
+  ],
+  "winners": [],
+  "blocked_promotes": [],
+  "used_conflict_keys": [],
+  "summary": {
+    "discovered_cycles": 1,
+    "promote_candidates": 0,
+    "winner_count": 0,
+    "defer_count": 1,
+    "rollback_count": 0
+  }
+}

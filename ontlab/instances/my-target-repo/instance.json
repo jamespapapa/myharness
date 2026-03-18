@@ -1,0 +1,9 @@
+{
+  "repo_name": "my-target-repo",
+  "slug": "my-target-repo",
+  "status": "bootstrapped",
+  "notes": [
+    "Populate graph/ with generated ontology instance artifacts.",
+    "Store question sets under questions/ and evaluation outputs under eval/."
+  ]
+}

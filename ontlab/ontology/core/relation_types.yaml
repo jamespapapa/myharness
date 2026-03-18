@@ -1,0 +1,14 @@
+relations:
+  - contains
+  - defines
+  - imports
+  - calls
+  - exposes
+  - handles
+  - dependsOn
+  - configuredBy
+  - consumes
+  - produces
+  - persistsTo
+  - deploysTo
+  - protects

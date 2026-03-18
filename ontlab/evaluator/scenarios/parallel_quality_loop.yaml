@@ -1,0 +1,20 @@
+cycle_scenario:
+  name: parallel-quality-loop
+  rules:
+    - one smallest safe change per cycle
+    - fan-out only across non-conflicting gaps
+    - single-promoter decides promotion
+    - integrated re-eval required after fan-in
+  steps:
+    - initialize cycle run directory and cycle.json
+    - rank explicit gaps from target eval and seed regression outputs
+    - select a non-conflicting fan-out batch
+    - run read-only exploration subagents per isolated cycle
+    - patch one rule inside each isolated worktree
+    - record trace, metrics, and artifacts for each cycle
+    - run target eval for each cycle
+    - run seed regression for each cycle
+    - fan-in cycle results
+    - promoter decides promote/defer/rollback
+    - rerun integrated target eval and seed regression
+    - pause or schedule the next batch

@@ -1,0 +1,19 @@
+{
+  "failures": [
+    {
+      "id": "s1",
+      "bucket": "retrieval failure",
+      "pack_candidates": [
+        "python-pack"
+      ]
+    },
+    {
+      "id": "s2",
+      "bucket": "should abstain",
+      "pack_candidates": [
+        "python-pack",
+        "infra-pack"
+      ]
+    }
+  ]
+}

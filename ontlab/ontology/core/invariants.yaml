@@ -1,0 +1,9 @@
+invariants:
+  - name: no_seed_fact_in_target_answers
+    rule: "Seed repo facts must not be used as direct answer evidence for target repo questions."
+  - name: core_stability
+    rule: "Core ontology changes require a migration plan and measurable answer-quality gain."
+  - name: abstain_before_invent
+    rule: "Low-evidence answers should prefer abstention over unsupported claims."
+  - name: one_small_change_per_cycle
+    rule: "Each improvement cycle may change only one pack/rule/rubric class."

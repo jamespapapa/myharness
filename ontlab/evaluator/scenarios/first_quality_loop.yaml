@@ -1,0 +1,12 @@
+cycle_scenario:
+  name: first-quality-loop
+  steps:
+    - build target repo ontology instance
+    - generate question set
+    - answer questions with evidence
+    - score with rubric
+    - bucket failures
+    - choose one smallest safe change
+    - re-run target eval
+    - run seed regressions
+    - decide promote/defer/rollback

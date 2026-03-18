@@ -1,0 +1,31 @@
+{
+  "gaps": [
+    {
+      "id": "gap-express-route-bind",
+      "summary": "express route registration evidence missing",
+      "score": 9,
+      "pack_candidates": ["express-pack"],
+      "likely_files": ["packs/express/routes.py"],
+      "shared_resources": ["instance:my-target-repo"],
+      "touches_skills": ["build-repo-ontology"]
+    },
+    {
+      "id": "gap-nextjs-config-link",
+      "summary": "config to deployment link missing",
+      "score": 7,
+      "pack_candidates": ["nextjs-pack"],
+      "likely_files": ["packs/nextjs/config.py"],
+      "shared_resources": ["instance:my-target-repo"],
+      "touches_skills": ["triage-answer-failures"]
+    },
+    {
+      "id": "gap-express-middleware-bind",
+      "summary": "middleware binding evidence missing",
+      "score": 8,
+      "pack_candidates": ["express-pack"],
+      "likely_files": ["packs/express/routes.py"],
+      "shared_resources": ["instance:my-target-repo"],
+      "touches_skills": ["build-repo-ontology"]
+    }
+  ]
+}

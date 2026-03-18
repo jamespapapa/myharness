@@ -1,0 +1,13 @@
+entities:
+  - Repository
+  - File
+  - Module
+  - Symbol
+  - Callable
+  - Endpoint
+  - Route
+  - ExternalInterface
+  - ConfigArtifact
+  - InfraDependency
+  - DataStore
+  - BuildArtifact
