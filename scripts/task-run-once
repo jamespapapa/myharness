@@ -14,6 +14,7 @@ dispatch_only=0
 assignment_slot=""
 assignment_channel=""
 assigned_by="task-run-once"
+explicit_task_id=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -49,9 +50,13 @@ while [[ $# -gt 0 ]]; do
       assigned_by="${2:-}"
       shift 2
       ;;
+    --task-id)
+      explicit_task_id="${2:-}"
+      shift 2
+      ;;
     -h|--help)
       cat <<'EOF'
-usage: scripts/task-run-once [--label <label>] [--log-file <path>] [--dry-run] [--assigned-only | --dispatch-only] [--assign-slot <slot>] [--assign-channel <channel>] [--assigned-by <name>]
+usage: scripts/task-run-once [--label <label>] [--log-file <path>] [--dry-run] [--assigned-only | --dispatch-only] [--assign-slot <slot>] [--assign-channel <channel>] [--assigned-by <name>] [--task-id <id>]
 EOF
       exit 0
       ;;
@@ -323,6 +328,42 @@ find_assigned_pending_task() {
   while IFS= read -r task_json; do
     [[ -n "$task_json" ]] || continue
     if [[ "$(classify_active_task "$task_json")" == "assigned" ]]; then
+      printf '%s\n' "$task_json"
+      return 0
+    fi
+  done < <(printf '%s' "$active_json" | jq -c '.[]')
+
+  return 1
+}
+
+find_task_by_id() {
+  local active_json="$1"
+  local target_task_id="$2"
+  local task_json
+
+  while IFS= read -r task_json; do
+    [[ -n "$task_json" ]] || continue
+    if [[ "$(printf '%s' "$task_json" | jq -r '.task_id // ""')" == "$target_task_id" ]]; then
+      printf '%s\n' "$task_json"
+      return 0
+    fi
+  done < <(printf '%s' "$active_json" | jq -c '.[]')
+
+  return 1
+}
+
+find_running_task_excluding() {
+  local active_json="$1"
+  local exclude_task_id="$2"
+  local task_json task_id
+
+  while IFS= read -r task_json; do
+    [[ -n "$task_json" ]] || continue
+    task_id=$(printf '%s' "$task_json" | jq -r '.task_id // ""')
+    if [[ -n "$exclude_task_id" && "$task_id" == "$exclude_task_id" ]]; then
+      continue
+    fi
+    if [[ "$(classify_active_task "$task_json")" == "running" ]]; then
       printf '%s\n' "$task_json"
       return 0
     fi
@@ -611,6 +652,52 @@ if [[ "$assigned_only" -eq 1 ]]; then
   assigned_tasks=$(filter_assigned_tasks_json "$active_tasks")
   assigned_total=$(printf '%s' "$assigned_tasks" | jq 'length')
   assigned_summary_text=$(active_summary "$assigned_tasks")
+
+  if [[ -n "$explicit_task_id" ]]; then
+    if explicit_task=$(find_task_by_id "$assigned_tasks" "$explicit_task_id" 2>/dev/null); then
+      if running_task=$(find_running_task_excluding "$assigned_tasks" "$explicit_task_id" 2>/dev/null); then
+        running_task_id=$(printf '%s' "$running_task" | jq -r '.task_id // ""')
+        waiting_detail="assignment $(assignment_ref) already has active work; task=$running_task_id; $assigned_summary_text"
+        emit_log "waiting" "assignment already busy" "" "$running_task_id" "$waiting_detail"
+        printf 'waiting: %s\n' "$waiting_detail"
+        exit 0
+      fi
+
+      explicit_state=$(classify_active_task "$explicit_task")
+      issue_number=$(printf '%s' "$explicit_task" | jq -r '.issue_number // ""')
+      title=$(printf '%s' "$explicit_task" | jq -r '.title')
+      task_id=$(printf '%s' "$explicit_task" | jq -r '.task_id')
+      case "$explicit_state" in
+        reconciling)
+          if [[ "$dry_run" -eq 1 ]]; then
+            waiting_detail="assigned task $task_id on $(assignment_ref) requires reconciliation before any new run; $assigned_summary_text"
+            emit_log "waiting" "assigned task requires reconciliation" "$issue_number" "$task_id" "$waiting_detail"
+            printf 'waiting: %s\n' "$waiting_detail"
+            exit 0
+          fi
+          reconcile_task "$explicit_task"
+          exit $?
+          ;;
+        running)
+          waiting_detail="requested task $task_id is already running on $(assignment_ref); $assigned_summary_text"
+          emit_log "waiting" "requested task already running" "$issue_number" "$task_id" "$waiting_detail"
+          printf 'waiting: %s\n' "$waiting_detail"
+          exit 0
+          ;;
+        assigned)
+          if [[ "$dry_run" -eq 1 ]]; then
+            emit_log "selected" "dry-run selected explicit assigned task" "$issue_number" "$task_id" "$(assignment_ref): $title"
+            printf 'selected assigned issue #%s for %s: %s\n' "$issue_number" "$(assignment_ref)" "$title"
+            exit 0
+          fi
+          run_worker_for_task "$explicit_task"
+          exit $?
+          ;;
+      esac
+    else
+      harness_die "requested task $explicit_task_id is not assigned to $(assignment_ref)"
+    fi
+  fi
 
   if running_task=$(find_explicit_running_task "$assigned_tasks" 2>/dev/null); then
     running_task_id=$(printf '%s' "$running_task" | jq -r '.task_id // ""')

@@ -182,8 +182,8 @@ if [[ "$launch" != "codex" ]]; then
 fi
 
 if [[ "$launch" == "codex" ]]; then
-  harness_notice "launching Codex via task-run-once for $assignment_label"
+  harness_notice "launching Codex via task-run-once for $assignment_label ($task_id)"
   harness_release_lock
   trap - EXIT
-  exec "$SCRIPT_DIR/task-run-once" --assigned-only --assign-slot "$assignment_slot" --assign-channel "$assignment_channel"
+  exec "$SCRIPT_DIR/task-run-once" --assigned-only --assign-slot "$assignment_slot" --assign-channel "$assignment_channel" --task-id "$task_id"
 fi

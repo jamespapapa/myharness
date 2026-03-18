@@ -895,6 +895,27 @@ scenario_task_start_launch_marks_claim_running() {
   assert_eq "$claim_count" "0" "task-start launch path should clear the claim after reconciliation"
 }
 
+scenario_task_start_launch_targets_explicit_task() {
+  local output explicit_status older_status older_claim_status
+
+  setup_fixture "task-start-explicit"
+  write_mock_issue 9015 "Explicit launch target" '[{"name":"Ready"}]'
+  write_mock_issue 9016 "Older assigned task" '[{"name":"Ready"}]'
+
+  task_env "$REPO_DIR/scripts/task-start" --issue 9016 --assign-slot slot-m --assign-channel exec-m >/dev/null
+  output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-start" --issue 9015 --assign-slot slot-m --assign-channel exec-m --launch codex)
+  assert_contains "$output" "success: reconciled issue #9015 -> PR https://example.test/pr/9015" "explicit task-start launches should reconcile the requested issue, not an older assigned task on the same slot"
+
+  explicit_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9015/task.json")
+  assert_eq "$explicit_status" "pr_open" "explicit task-start launch should open a PR for the requested issue"
+
+  older_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9016/task.json")
+  assert_eq "$older_status" "assigned" "older assigned work on the same slot should remain assigned"
+
+  older_claim_status=$(jq -r '"example/test-harness#9016" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$older_claim_status" "assigned" "older assigned claim should stay untouched when launching an explicit different issue"
+}
+
 scenario_assigned_launch_refreshes_claim_timestamp() {
   local stale_epoch stale_iso pid running_status refreshed_epoch output final_status claim_count
 
@@ -1062,6 +1083,7 @@ scenario_dispatch_only_rework_stays_assigned
 scenario_stale_dispatch_rework_returns_to_rework
 scenario_assigned_claim_expires_to_requeue
 scenario_task_start_launch_marks_claim_running
+scenario_task_start_launch_targets_explicit_task
 scenario_assigned_launch_refreshes_claim_timestamp
 scenario_assigned_only_reconciles_stale_in_progress_task
 scenario_assigned_only_waits_when_slot_busy
