@@ -8,6 +8,7 @@
 
 - `ops/HARNESS_ADMIN.md`
 - `ops/MULTI_PROJECT_MODEL.md`
+- `scripts/check-sync-owned-paths`
 - `scripts/check-task-control-room-once`
 - `scripts/check-task-run-once`
 - `scripts/harness-lib.sh`
@@ -23,6 +24,7 @@
 
 ## Verification
 
+- `scripts/check-sync-owned-paths --self-test`
 - `scripts/check-task-run-once`
 - `scripts/check-task-control-room-once`
-- `HARNESS_BASE_BRANCH=dev scripts/check-harness`
+- `scripts/check-harness`

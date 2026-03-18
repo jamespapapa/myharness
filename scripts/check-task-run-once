@@ -703,6 +703,58 @@ scenario_dispatch_only_rework_stays_assigned() {
   assert_contains "$note" "assigned to exec-r/slot-r" "dispatch-only rework note should mention the assignment target"
 }
 
+scenario_stale_dispatch_rework_returns_to_rework() {
+  local dispatch_output run_output stale_iso stale_epoch task_status claim_count pr_url note attempts
+
+  setup_fixture "stale-dispatch-rework"
+  write_mock_issue 9019 "Stale dispatch rework issue" '[{"name":"Ready"}]'
+  write_issue_list '[]'
+
+  task_env "$REPO_DIR/scripts/task-start" --issue 9019 --assign-slot slot-r3 --assign-channel exec-r3 >/dev/null
+  jq '
+    .status = "rework"
+    | .pr_url = "https://example.test/pr/9019"
+    | .last_review_verdict = "rework"
+    | .review_rework_attempts = 1
+    | .review_rework_limit = 3
+  ' "$REPO_DIR/.harness/tasks/issue-9019/task.json" > "$REPO_DIR/.harness/tasks/issue-9019/task.json.tmp"
+  mv "$REPO_DIR/.harness/tasks/issue-9019/task.json.tmp" "$REPO_DIR/.harness/tasks/issue-9019/task.json"
+  printf '{}\n' > "$REPO_DIR/.harness/state/claims.json"
+
+  dispatch_output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once" --dispatch-only --assign-slot slot-r3 --assign-channel exec-r3)
+  assert_eq "$dispatch_output" "success: dispatched review rework issue #9019 -> exec-r3/slot-r3" "dispatch-only mode should assign rework to the remote executor slot"
+
+  stale_epoch=$(( $(date -u +%s) - 7200 ))
+  stale_iso=$(date -u -r "$stale_epoch" +"%Y-%m-%dT%H:%M:%SZ")
+  jq --arg claimed_at "$stale_iso" --argjson claimed_epoch "$stale_epoch" '
+    ."example/test-harness#9019".claimed_at = $claimed_at
+    | ."example/test-harness#9019".claimed_epoch = $claimed_epoch
+  ' "$REPO_DIR/.harness/state/claims.json" > "$REPO_DIR/.harness/state/claims.json.tmp"
+  mv "$REPO_DIR/.harness/state/claims.json.tmp" "$REPO_DIR/.harness/state/claims.json"
+
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_CLAIM_TTL_MINUTES="1"
+EOF
+
+  run_output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once")
+  assert_eq "$run_output" "success: requeued review rework issue #9019" "expired dispatch-only rework should return to the rework queue instead of reopening the old PR head"
+
+  task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9019/task.json")
+  assert_eq "$task_status" "rework" "expired dispatch-only rework should remain in rework state"
+
+  attempts=$(jq -r '.review_rework_attempts' "$REPO_DIR/.harness/tasks/issue-9019/task.json")
+  assert_eq "$attempts" "1" "expired dispatch-only rework should preserve the recorded attempt count"
+
+  pr_url=$(jq -r '.pr_url // ""' "$REPO_DIR/.harness/tasks/issue-9019/task.json")
+  assert_eq "$pr_url" "https://example.test/pr/9019" "expired dispatch-only rework should preserve the existing PR linkage"
+
+  note=$(jq -r '.note // ""' "$REPO_DIR/.harness/tasks/issue-9019/task.json")
+  assert_contains "$note" "expired before execution" "expired dispatch-only rework should explain why it returned to rework"
+
+  claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_count" "0" "expired dispatch-only rework should clear the stale claim"
+}
+
 scenario_assigned_claim_expires_to_requeue() {
   local run_output stale_iso stale_epoch task_status claim_count
 
@@ -751,6 +803,9 @@ scenario_assigned_launch_refreshes_claim_timestamp() {
   local stale_epoch stale_iso pid running_status refreshed_epoch output final_status claim_count
 
   setup_fixture "assigned-launch-refresh"
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_EXECUTOR_TIMEOUT_SECONDS="5"
+EOF
   write_mock_issue 9018 "Assigned launch refreshes claim timestamp" '[{"name":"Ready"}]'
   write_issue_list '[{"number":9018,"title":"Assigned launch refreshes claim timestamp","labels":[{"name":"Ready"}]}]'
 
@@ -869,6 +924,7 @@ scenario_dispatch_only_records_assignment
 scenario_assigned_only_does_not_fetch_queue
 scenario_assigned_only_runs_preassigned_work
 scenario_dispatch_only_rework_stays_assigned
+scenario_stale_dispatch_rework_returns_to_rework
 scenario_assigned_claim_expires_to_requeue
 scenario_task_start_launch_marks_claim_running
 scenario_assigned_launch_refreshes_claim_timestamp

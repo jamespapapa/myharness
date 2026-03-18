@@ -309,6 +309,7 @@ Each task record also keeps:
 - `review_rework_limit`: the retry cap, currently `3`
 
 When review returns `rework`, the control room routes that task back to executor before claiming a new issue. If review still returns `rework` on the third attempt, the task is converted to `blocked` and escalated.
+If a dispatch-only rework assignment expires before any executor launches it, the task must return to `rework` on the same PR branch; it must not drift back to plain `pr_open` or a fresh issue claim.
 
 ## Stage Summaries
 

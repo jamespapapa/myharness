@@ -338,6 +338,7 @@ reconcile_task() {
   local task_json="$1"
   local issue_number task_id title worktree branch base_branch base_remote_ref base_sha repo_slug claim_key worker_log
   local task_json_path status pr_url note ahead_count recovery_reason sync_reason claim_status assignment_slot assignment_channel
+  local review_rework_attempts last_review_verdict task_assignment_ref
   local -a changed_files
 
   issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
@@ -354,6 +355,9 @@ reconcile_task() {
   claim_status=$(printf '%s' "$task_json" | jq -r '.claim_status // ""')
   assignment_slot=$(printf '%s' "$task_json" | jq -r '.assignment.slot // ""')
   assignment_channel=$(printf '%s' "$task_json" | jq -r '.assignment.channel // ""')
+  review_rework_attempts=$(printf '%s' "$task_json" | jq -r '.review_rework_attempts // 0')
+  last_review_verdict=$(printf '%s' "$task_json" | jq -r '.last_review_verdict // ""')
+  task_assignment_ref="${assignment_channel}/${assignment_slot}"
   task_json_path=$(harness_task_status_path "$task_id")
 
   if [[ -n "$claim_key" ]]; then
@@ -411,10 +415,18 @@ reconcile_task() {
               recovery_reason="executor reconcile could not push branch $branch"
               "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
             fi
+          elif [[ ( -z "$claim_status" || "$claim_status" == "assigned" ) && -n "$assignment_slot" && -n "$assignment_channel" ]]; then
+            if [[ "$last_review_verdict" == "rework" || "${review_rework_attempts:-0}" -gt 0 ]]; then
+              if [[ -n "$claim_key" ]]; then
+                harness_remove_claim "$claim_key"
+              fi
+              recovery_reason="automatic review rework assignment expired before execution; returned to rework queue from $task_assignment_ref"
+              harness_update_task_status "$task_id" "rework" "$recovery_reason" "$pr_url"
+            else
+              "$SCRIPT_DIR/task-finish" --issue "$issue_number" --unclaim >/dev/null 2>&1 || true
+            fi
           elif [[ -n "$pr_url" ]]; then
             "$SCRIPT_DIR/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null 2>&1 || true
-          elif [[ ( -z "$claim_status" || "$claim_status" == "assigned" ) && -n "$assignment_slot" && -n "$assignment_channel" ]]; then
-            "$SCRIPT_DIR/task-finish" --issue "$issue_number" --unclaim >/dev/null 2>&1 || true
           else
             recovery_reason="executor reconcile found no commits, PR, or explicit task-finish; log=${worker_log:-unknown}"
             "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
@@ -445,6 +457,11 @@ reconcile_task() {
     created)
       emit_log "success" "requeued stale assigned task" "$issue_number" "$task_id" "$note"
       printf 'success: requeued issue #%s for reassignment\n' "$issue_number"
+      return 0
+      ;;
+    rework)
+      emit_log "success" "requeued stale assigned review rework" "$issue_number" "$task_id" "$note"
+      printf 'success: requeued review rework issue #%s\n' "$issue_number"
       return 0
       ;;
     blocked)
