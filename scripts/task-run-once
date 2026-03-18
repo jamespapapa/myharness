@@ -446,57 +446,63 @@ reconcile_task() {
           [[ -n "$changed_file" ]] || continue
           changed_files+=("$changed_file")
         done < <(collect_changed_files "$worktree")
-        if [[ "${#changed_files[@]}" -gt 0 ]]; then
-          git -C "$worktree" add -- "${changed_files[@]}"
-          git -C "$worktree" commit -m "fix: address issue #$issue_number" >/dev/null 2>&1 || true
-        fi
 
-        if sync_reason=$(harness_task_base_sync_reason "$task_id" 2>/dev/null); then
-          if [[ -n "$base_remote_ref" ]]; then
-            ahead_count=$(git -C "$worktree" rev-list --count "${base_remote_ref}..HEAD" 2>/dev/null || echo 0)
-          elif [[ -n "$base_sha" ]]; then
-            ahead_count=$(git -C "$worktree" rev-list --count "${base_sha}..HEAD" 2>/dev/null || echo 0)
-          else
-            ahead_count=$(git -C "$worktree" rev-list --count "${base_branch}..HEAD" 2>/dev/null || echo 0)
-          fi
-          if [[ "${ahead_count:-0}" -gt 0 ]]; then
-            if git -C "$worktree" push -u origin "$branch" >/dev/null 2>&1; then
-              if [[ -z "$pr_url" ]]; then
-                pr_url=$(gh pr create -R "$repo_slug" --base "$base_branch" --head "$branch" --title "$title" --body-file "$(harness_task_dir "$task_id")/PR_BODY.md" 2>/dev/null || true)
-                if [[ -z "$pr_url" ]]; then
-                  pr_url=$(gh pr list -R "$repo_slug" --head "$branch" --json url --jq '.[0].url // ""' 2>/dev/null || true)
-                fi
-              fi
-
-              if [[ -n "$pr_url" ]]; then
-                "$SCRIPT_DIR/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null 2>&1 || true
-              else
-                recovery_reason="executor reconcile pushed branch but could not open PR; branch=$branch"
-                "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
-              fi
-            else
-              recovery_reason="executor reconcile could not push branch $branch"
-              "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
-            fi
-          elif [[ ( -z "$claim_status" || "$claim_status" == "assigned" ) && -n "$assignment_slot" && -n "$assignment_channel" ]]; then
-            if [[ "$last_review_verdict" == "rework" || "${review_rework_attempts:-0}" -gt 0 ]]; then
-              if [[ -n "$claim_key" ]]; then
-                harness_remove_claim "$claim_key"
-              fi
-              recovery_reason="automatic review rework assignment expired before execution; returned to rework queue from $task_assignment_ref"
-              harness_update_task_status "$task_id" "rework" "$recovery_reason" "$pr_url"
-            else
-              "$SCRIPT_DIR/task-finish" --issue "$issue_number" --unclaim >/dev/null 2>&1 || true
-            fi
-          elif [[ -n "$pr_url" ]]; then
-            "$SCRIPT_DIR/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null 2>&1 || true
-          else
-            recovery_reason="executor reconcile found no commits, PR, or explicit task-finish; log=${worker_log:-unknown}"
+        if [[ ( -z "$claim_status" || "$claim_status" == "assigned" ) && -n "$assignment_slot" && -n "$assignment_channel" ]]; then
+          if [[ "${#changed_files[@]}" -gt 0 ]]; then
+            recovery_reason="assigned task expired before execution with local changes; manual intervention required: $worktree"
             "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
+          elif [[ "$last_review_verdict" == "rework" || "${review_rework_attempts:-0}" -gt 0 ]]; then
+            if [[ -n "$claim_key" ]]; then
+              harness_remove_claim "$claim_key"
+            fi
+            recovery_reason="automatic review rework assignment expired before execution; returned to rework queue from $task_assignment_ref"
+            harness_update_task_status "$task_id" "rework" "$recovery_reason" "$pr_url"
+          else
+            "$SCRIPT_DIR/task-finish" --issue "$issue_number" --unclaim >/dev/null 2>&1 || true
           fi
         else
-          recovery_reason="$sync_reason"
-          "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
+          if [[ "${#changed_files[@]}" -gt 0 ]]; then
+            git -C "$worktree" add -- "${changed_files[@]}"
+            git -C "$worktree" commit -m "fix: address issue #$issue_number" >/dev/null 2>&1 || true
+          fi
+
+          if sync_reason=$(harness_task_base_sync_reason "$task_id" 2>/dev/null); then
+            if [[ -n "$base_remote_ref" ]]; then
+              ahead_count=$(git -C "$worktree" rev-list --count "${base_remote_ref}..HEAD" 2>/dev/null || echo 0)
+            elif [[ -n "$base_sha" ]]; then
+              ahead_count=$(git -C "$worktree" rev-list --count "${base_sha}..HEAD" 2>/dev/null || echo 0)
+            else
+              ahead_count=$(git -C "$worktree" rev-list --count "${base_branch}..HEAD" 2>/dev/null || echo 0)
+            fi
+            if [[ "${ahead_count:-0}" -gt 0 ]]; then
+              if git -C "$worktree" push -u origin "$branch" >/dev/null 2>&1; then
+                if [[ -z "$pr_url" ]]; then
+                  pr_url=$(gh pr create -R "$repo_slug" --base "$base_branch" --head "$branch" --title "$title" --body-file "$(harness_task_dir "$task_id")/PR_BODY.md" 2>/dev/null || true)
+                  if [[ -z "$pr_url" ]]; then
+                    pr_url=$(gh pr list -R "$repo_slug" --head "$branch" --json url --jq '.[0].url // ""' 2>/dev/null || true)
+                  fi
+                fi
+
+                if [[ -n "$pr_url" ]]; then
+                  "$SCRIPT_DIR/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null 2>&1 || true
+                else
+                  recovery_reason="executor reconcile pushed branch but could not open PR; branch=$branch"
+                  "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
+                fi
+              else
+                recovery_reason="executor reconcile could not push branch $branch"
+                "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
+              fi
+            elif [[ -n "$pr_url" ]]; then
+              "$SCRIPT_DIR/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null 2>&1 || true
+            else
+              recovery_reason="executor reconcile found no commits, PR, or explicit task-finish; log=${worker_log:-unknown}"
+              "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
+            fi
+          else
+            recovery_reason="$sync_reason"
+            "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
+          fi
         fi
         ;;
     esac
@@ -655,6 +661,21 @@ if [[ "$assigned_only" -eq 1 ]]; then
 
   if [[ -n "$explicit_task_id" ]]; then
     if explicit_task=$(find_task_by_id "$assigned_tasks" "$explicit_task_id" 2>/dev/null); then
+      if reconcilable_task=$(find_reconcilable_active_task "$assigned_tasks" 2>/dev/null); then
+        reconcile_issue_number=$(printf '%s' "$reconcilable_task" | jq -r '.issue_number // ""')
+        reconcile_task_id=$(printf '%s' "$reconcilable_task" | jq -r '.task_id')
+        if [[ "$reconcile_task_id" != "$explicit_task_id" ]]; then
+          if [[ "$dry_run" -eq 1 ]]; then
+            waiting_detail="assigned task $reconcile_task_id on $(assignment_ref) requires reconciliation before launching $explicit_task_id; $assigned_summary_text"
+            emit_log "waiting" "assigned task requires reconciliation" "$reconcile_issue_number" "$reconcile_task_id" "$waiting_detail"
+            printf 'waiting: %s\n' "$waiting_detail"
+            exit 0
+          fi
+          reconcile_task "$reconcilable_task"
+          exit $?
+        fi
+      fi
+
       if running_task=$(find_running_task_excluding "$assigned_tasks" "$explicit_task_id" 2>/dev/null); then
         running_task_id=$(printf '%s' "$running_task" | jq -r '.task_id // ""')
         waiting_detail="assignment $(assignment_ref) already has active work; task=$running_task_id; $assigned_summary_text"
