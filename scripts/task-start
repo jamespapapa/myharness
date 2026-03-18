@@ -176,6 +176,11 @@ printf '  cd %q && codex\n' "$codex_session"
 printf 'OpenClaw task command:\n'
 printf '  cd %q && openclaw\n' "$openclaw_session"
 
+if [[ "$launch" != "codex" ]]; then
+  printf '\n'
+  printf 'note: this task is still assigned, not running. Use --launch codex for local manual work, or hand the assignment to another execution channel later.\n'
+fi
+
 if [[ "$launch" == "codex" ]]; then
   harness_update_task_status "$task_id" "in_progress"
   harness_update_claim_status "$claim_key" "in_progress" "task-start launched Codex directly"

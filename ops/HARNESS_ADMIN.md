@@ -185,9 +185,11 @@ scripts/task-next --label Ready
 
 ### 3. Claim and create a task workspace
 
+For a local manual Codex run, start it through `task-start` so the harness marks the task as actively running:
+
 ```bash
-scripts/task-start --issue 123
-scripts/task-start --next --label bug
+scripts/task-start --issue 123 --launch codex
+scripts/task-start --next --label bug --launch codex
 ```
 
 This will:
@@ -199,11 +201,16 @@ This will:
 - write `TASK.md`, `PR_BODY.md`, and `task.json`,
 - label the GitHub issue as in progress,
 - comment the claim in GitHub,
-- store a local claim record.
+- store a local claim record,
+- mark the task `in_progress` before launching the local worker.
+
+If you omit `--launch codex`, `task-start` only reserves/assigns the task. That claim stays in `assigned` until another execution channel picks it up, so use the plain form for dispatch-only or delayed-start flows, not for an operator who is about to begin local work immediately.
 
 ### 4. Hand off to a worker
 
-Use the command printed by `task-start`, or manually:
+For local manual Codex work, prefer `scripts/task-start ... --launch codex` above.
+
+The printed session commands are still useful for inspecting the prepared workspace or for a remote/assigned worker that will pick up the task later:
 
 ```bash
 cd /abs/path/to/worktree/.harness-session/codex
@@ -523,10 +530,10 @@ To open and claim it immediately:
 ### “Codex, work issue #123”
 
 ```bash
-scripts/task-start --issue 123
-cd /abs/path/to/worktree/.harness-session/codex
-codex
+scripts/task-start --issue 123 --launch codex
 ```
+
+Use plain `scripts/task-start --issue 123` only when you want to reserve/assign the workspace without marking it running yet.
 
 Before the worker hands anything off, it must sync the task branch with the latest `origin/<base_branch>` named in `TASK.md`, rerun verification on the merged branch if that base moved, and record an explicit blocker if the merge is unsafe.
 
