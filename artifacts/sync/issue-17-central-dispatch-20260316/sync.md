@@ -6,12 +6,14 @@
 
 ## Shared Paths
 
+- `.harness/profiles/openclaw-manager/AGENTS.md`
 - `ops/HARNESS_ADMIN.md`
 - `ops/MULTI_PROJECT_MODEL.md`
 - `scripts/check-sync-owned-paths`
 - `scripts/check-task-control-room-once`
 - `scripts/check-task-run-once`
 - `scripts/harness-lib.sh`
+- `scripts/openclaw-manager-setup`
 - `scripts/task-control-room-once`
 - `scripts/task-create`
 - `scripts/task-next`

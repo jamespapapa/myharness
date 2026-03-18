@@ -859,19 +859,40 @@ EOF
 }
 
 scenario_task_start_launch_marks_claim_running() {
-  local claim_status task_status
+  local pid claim_status task_status output final_status claim_count
 
   setup_fixture "task-start-launch"
   write_mock_issue 9015 "Direct launch claim status" '[{"name":"Ready"}]'
   write_issue_list '[{"number":9015,"title":"Direct launch claim status","labels":[{"name":"Ready"}]}]'
 
-  task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-start" --issue 9015 --assign-slot slot-l --assign-channel exec-l --launch codex >/dev/null
+  task_env HARNESS_MOCK_CODEX_MODE="sleep-touch-readme" "$REPO_DIR/scripts/task-start" --issue 9015 --assign-slot slot-l --assign-channel exec-l --launch codex >"$FIXTURE_DIR/task-start-launch.out" 2>&1 &
+  pid=$!
 
-  claim_status=$(jq -r '"example/test-harness#9015" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
-  assert_eq "$claim_status" "in_progress" "direct task-start launches should mark the claim running before Codex starts"
+  claim_status=""
+  task_status=""
+  for _ in $(seq 1 120); do
+    if [[ -f "$REPO_DIR/.harness/state/claims.json" && -f "$REPO_DIR/.harness/tasks/issue-9015/task.json" ]]; then
+      claim_status=$(jq -r '"example/test-harness#9015" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
+      task_status=$(jq -r '.status // ""' "$REPO_DIR/.harness/tasks/issue-9015/task.json")
+      if [[ "$claim_status" == "in_progress" && "$task_status" == "in_progress" ]]; then
+        break
+      fi
+    fi
+    sleep 0.1
+  done
 
-  task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9015/task.json")
-  assert_eq "$task_status" "in_progress" "direct task-start launches should mark the task in progress before Codex starts"
+  assert_eq "$claim_status" "in_progress" "task-start --launch codex should mark the claim running before Codex finishes"
+  assert_eq "$task_status" "in_progress" "task-start --launch codex should mark the task in progress before Codex finishes"
+
+  wait "$pid"
+  output=$(cat "$FIXTURE_DIR/task-start-launch.out")
+  assert_contains "$output" "success: reconciled issue #9015 -> PR https://example.test/pr/9015" "task-start --launch codex should reconcile to pr_open after Codex exits"
+
+  final_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9015/task.json")
+  assert_eq "$final_status" "pr_open" "task-start launch path should reconcile to pr_open"
+
+  claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_count" "0" "task-start launch path should clear the claim after reconciliation"
 }
 
 scenario_assigned_launch_refreshes_claim_timestamp() {
