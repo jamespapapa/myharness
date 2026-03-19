@@ -85,3 +85,4 @@ Primary docs:
 - [ops/HARNESS_SYNC.md](/Users/jules/Desktop/work/myharness/ops/HARNESS_SYNC.md)
 - [ops/PROJECT_AGENTS_CONTRACT.md](/Users/jules/Desktop/work/myharness/ops/PROJECT_AGENTS_CONTRACT.md)
 - [.harness/project.env](/Users/jules/Desktop/work/myharness/.harness/project.env)
+# code-scouter
