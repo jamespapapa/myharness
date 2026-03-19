@@ -1,0 +1,9 @@
+node_modules/
+apps/web/dist/
+coverage/
+data/*
+!data/.gitkeep
+.omx/logs/
+.omx/state/
+.omx/metrics.json
+.DS_Store
