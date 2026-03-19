@@ -173,6 +173,10 @@ case "${HARNESS_MOCK_CODEX_MODE:-touch-readme}" in
     git -C "$repo_dir" push origin dev >/dev/null 2>&1
     git -C "$repo_dir" checkout -q main
     ;;
+  sleep-touch-readme)
+    sleep 1
+    printf '\nACP reconcile proof from mock codex.\n' >>README.md
+    ;;
   no-op)
     ;;
   *)
@@ -222,7 +226,7 @@ setup_fixture() {
 
   cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
 HARNESS_AUTONOMOUS_LABEL="Ready"
-HARNESS_EXECUTOR_TIMEOUT_SECONDS="2"
+HARNESS_EXECUTOR_TIMEOUT_SECONDS="30"
 HARNESS_EXECUTOR_ACTIVE_LIMIT="1"
 EOF
 }
@@ -371,9 +375,12 @@ EOF
   write_mock_issue 9002 "Queued issue" '[{"name":"Ready"}]'
   write_issue_list '[{"number":9002,"title":"Queued issue","labels":[{"name":"Ready"}]}]'
 
-  output=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once")
+  if ! output=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once" 2>&1); then
+    printf 'task-run-once unexpectedly failed in active-limit scenario\n%s\n' "$output" >&2
+    exit 1
+  fi
   assert_contains "$output" "waiting: active limit reached before claiming issue #9002;" "active limit should block new claims"
-  assert_contains "$output" "running=1 reconciling=0 total=1 limit=1" "waiting output should describe active running work"
+  assert_contains "$output" "assigned=0 running=1 reconciling=0 total=1 limit=1" "waiting output should describe active running work"
 
   claim_keys=$(jq -r 'keys[]' "$REPO_DIR/.harness/state/claims.json")
   assert_eq "$claim_keys" "example/test-harness#9001" "existing claim should remain untouched"
@@ -440,6 +447,146 @@ EOF
   fi
 }
 
+scenario_task_start_rejects_local_in_progress_without_claim() {
+  local now_epoch now_iso output
+
+  setup_fixture "start-local-active"
+  now_epoch=$(date -u +%s)
+  now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  mkdir -p "$REPO_DIR/.harness/tasks/issue-9021" "$WORKTREE_ROOT/issue-9021"
+
+  cat >"$REPO_DIR/.harness/tasks/issue-9021/task.json" <<EOF
+{
+  "task_id": "issue-9021",
+  "issue_number": 9021,
+  "title": "Locally active issue",
+  "repo_slug": "example/test-harness",
+  "branch": "fix/issue-9021",
+  "base_branch": "dev",
+  "worktree": "$WORKTREE_ROOT/issue-9021",
+  "status": "in_progress",
+  "created_at": "$now_iso",
+  "updated_at": "$now_iso"
+}
+EOF
+
+  mkdir -p "$REPO_DIR/.harness/state"
+  printf '{}\n' > "$REPO_DIR/.harness/state/claims.json"
+  write_mock_issue 9021 "Locally active issue" '[{"name":"Ready"}]'
+
+  if output=$(task_env "$REPO_DIR/scripts/task-start" --issue 9021 2>&1); then
+    printf 'task-start should reject duplicate launches when a local in_progress task already exists\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$output" "issue already has active task: issue-9021" "task-start should use the local task file as a duplicate guard when claims.json is stale"
+}
+
+scenario_task_start_rejects_local_assigned_without_claim() {
+  local now_iso output
+
+  setup_fixture "start-local-assigned"
+  now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  mkdir -p "$REPO_DIR/.harness/tasks/issue-9023" "$WORKTREE_ROOT/issue-9023"
+
+  cat >"$REPO_DIR/.harness/tasks/issue-9023/task.json" <<EOF
+{
+  "task_id": "issue-9023",
+  "issue_number": 9023,
+  "title": "Locally assigned issue",
+  "repo_slug": "example/test-harness",
+  "branch": "fix/issue-9023",
+  "base_branch": "dev",
+  "worktree": "$WORKTREE_ROOT/issue-9023",
+  "status": "assigned",
+  "created_at": "$now_iso",
+  "updated_at": "$now_iso"
+}
+EOF
+
+  mkdir -p "$REPO_DIR/.harness/state"
+  printf '{}\n' > "$REPO_DIR/.harness/state/claims.json"
+  write_mock_issue 9023 "Locally assigned issue" '[{"name":"Ready"}]'
+
+  if output=$(task_env "$REPO_DIR/scripts/task-start" --issue 9023 2>&1); then
+    printf 'task-start should reject duplicate launches when a local assigned task already exists\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$output" "issue already has active task: issue-9023" "task-start should use local assigned tasks as a duplicate guard when claims.json is stale"
+}
+
+scenario_task_next_skips_local_in_progress_without_claim() {
+  local now_epoch now_iso output
+
+  setup_fixture "next-local-active"
+  now_epoch=$(date -u +%s)
+  now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  mkdir -p "$REPO_DIR/.harness/tasks/issue-9022" "$WORKTREE_ROOT/issue-9022"
+
+  cat >"$REPO_DIR/.harness/tasks/issue-9022/task.json" <<EOF
+{
+  "task_id": "issue-9022",
+  "issue_number": 9022,
+  "title": "Locally active queued issue",
+  "repo_slug": "example/test-harness",
+  "branch": "fix/issue-9022",
+  "base_branch": "dev",
+  "worktree": "$WORKTREE_ROOT/issue-9022",
+  "status": "in_progress",
+  "created_at": "$now_iso",
+  "updated_at": "$now_iso"
+}
+EOF
+
+  mkdir -p "$REPO_DIR/.harness/state"
+  printf '{}\n' > "$REPO_DIR/.harness/state/claims.json"
+  write_mock_issue 9022 "Locally active queued issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9022,"title":"Locally active queued issue","labels":[{"name":"Ready"}]}]'
+
+  if output=$(task_env "$REPO_DIR/scripts/task-next" 2>&1); then
+    printf 'task-next should skip issues that already have a local in_progress task even when claims.json is empty\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$output" "no eligible issue found" "task-next should ignore issues with a local in_progress task record"
+}
+
+scenario_task_next_skips_local_assigned_without_claim() {
+  local now_iso output
+
+  setup_fixture "next-local-assigned"
+  now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  mkdir -p "$REPO_DIR/.harness/tasks/issue-9024" "$WORKTREE_ROOT/issue-9024"
+
+  cat >"$REPO_DIR/.harness/tasks/issue-9024/task.json" <<EOF
+{
+  "task_id": "issue-9024",
+  "issue_number": 9024,
+  "title": "Locally assigned queued issue",
+  "repo_slug": "example/test-harness",
+  "branch": "fix/issue-9024",
+  "base_branch": "dev",
+  "worktree": "$WORKTREE_ROOT/issue-9024",
+  "status": "assigned",
+  "created_at": "$now_iso",
+  "updated_at": "$now_iso"
+}
+EOF
+
+  mkdir -p "$REPO_DIR/.harness/state"
+  printf '{}\n' > "$REPO_DIR/.harness/state/claims.json"
+  write_mock_issue 9024 "Locally assigned queued issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9024,"title":"Locally assigned queued issue","labels":[{"name":"Ready"}]}]'
+
+  if output=$(task_env "$REPO_DIR/scripts/task-next" 2>&1); then
+    printf 'task-next should skip issues that already have a local assigned task even when claims.json is empty\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$output" "no eligible issue found" "task-next should ignore issues with a local assigned task record"
+}
+
 scenario_waits_when_queue_empty_but_active_work_remains() {
   local now_epoch now_iso output
 
@@ -482,9 +629,12 @@ EOF
 
   write_issue_list '[]'
 
-  output=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once")
-  assert_contains "$output" "waiting: ready queue empty; active work still running/reconciling;" "queue-empty should not report idle while active work remains"
-  assert_contains "$output" "running=1 reconciling=0 total=1 limit=1" "queue-empty waiting output should describe active running work"
+  if ! output=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once" 2>&1); then
+    printf 'task-run-once unexpectedly failed in queue-empty scenario\n%s\n' "$output" >&2
+    exit 1
+  fi
+  assert_contains "$output" "waiting: ready queue empty; active work still assigned/running/reconciling;" "queue-empty should not report idle while active work remains"
+  assert_contains "$output" "assigned=0 running=1 reconciling=0 total=1 limit=1" "queue-empty waiting output should describe active running work"
 }
 
 scenario_recovers_stale_in_progress_task() {
@@ -543,11 +693,481 @@ EOF
   assert_eq "$claim_count" "0" "stale claim should be removed after reconciliation"
 }
 
+scenario_dispatch_only_records_assignment() {
+  local output claim_status task_status assignment_slot assignment_channel assigned_by worker_log claim_summary
+
+  setup_fixture "dispatch-only"
+  write_mock_issue 9010 "Dispatch only issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9010,"title":"Dispatch only issue","labels":[{"name":"Ready"}]}]'
+
+  output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once" --dispatch-only --assign-slot slot-a --assign-channel exec-a)
+  assert_eq "$output" "success: dispatched issue #9010 -> exec-a/slot-a" "dispatch-only mode should claim and assign without launching Codex"
+
+  claim_status=$(jq -r '."example/test-harness#9010".status' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_status" "assigned" "dispatch-only should leave the claim in assigned status"
+
+  task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9010/task.json")
+  assert_eq "$task_status" "assigned" "dispatch-only should leave the task assigned until a worker starts it"
+
+  assignment_slot=$(jq -r '.assignment.slot // ""' "$REPO_DIR/.harness/tasks/issue-9010/task.json")
+  assert_eq "$assignment_slot" "slot-a" "task record should store the assigned slot"
+
+  assignment_channel=$(jq -r '.assignment.channel // ""' "$REPO_DIR/.harness/tasks/issue-9010/task.json")
+  assert_eq "$assignment_channel" "exec-a" "task record should store the assigned channel"
+
+  assigned_by=$(jq -r '.assignment.assigned_by // ""' "$REPO_DIR/.harness/tasks/issue-9010/task.json")
+  assert_eq "$assigned_by" "task-run-once" "direct dispatch should record task-run-once as the assignment owner"
+
+  worker_log=$(jq -r '."example/test-harness#9010".worker_log // ""' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$worker_log" "" "dispatch-only should not launch the worker"
+
+  claim_summary=$(jq -r '.last_stage_summary.happened // ""' "$REPO_DIR/.harness/tasks/issue-9010/task.json")
+  assert_contains "$claim_summary" "assigned the task to exec-a/slot-a" "claim summary should mention the assignment target"
+}
+
+scenario_assigned_only_does_not_fetch_queue() {
+  local output
+
+  setup_fixture "assigned-idle"
+  write_mock_issue 9011 "Queued but unassigned issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9011,"title":"Queued but unassigned issue","labels":[{"name":"Ready"}]}]'
+
+  output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once" --assigned-only --assign-slot slot-a --assign-channel exec-a)
+  assert_eq "$output" "idle: no task assigned to exec-a/slot-a" "assigned-only mode should stay queue-blind when nothing is assigned"
+
+  if [[ -e "$REPO_DIR/.harness/tasks/issue-9011/task.json" ]]; then
+    printf 'assigned-only mode should not have materialized a queued issue without an assignment\n' >&2
+    exit 1
+  fi
+}
+
+scenario_dispatch_only_rework_stays_assigned() {
+  local output claim_status task_status worker_log assignment_slot assignment_channel note
+
+  setup_fixture "dispatch-rework"
+  write_mock_issue 9013 "Dispatch rework issue" '[{"name":"Ready"}]'
+  write_issue_list '[]'
+
+  task_env "$REPO_DIR/scripts/task-start" --issue 9013 --assign-slot slot-r --assign-channel exec-r >/dev/null
+  jq '
+    .status = "rework"
+    | .pr_url = "https://example.test/pr/9013"
+    | .review_rework_attempts = 1
+    | .review_rework_limit = 3
+  ' "$REPO_DIR/.harness/tasks/issue-9013/task.json" > "$REPO_DIR/.harness/tasks/issue-9013/task.json.tmp"
+  mv "$REPO_DIR/.harness/tasks/issue-9013/task.json.tmp" "$REPO_DIR/.harness/tasks/issue-9013/task.json"
+  printf '{}
+' > "$REPO_DIR/.harness/state/claims.json"
+
+  output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once" --dispatch-only --assign-slot slot-r --assign-channel exec-r)
+  assert_eq "$output" "success: dispatched review rework issue #9013 -> exec-r/slot-r" "dispatch-only mode should assign queued rework instead of launching it locally"
+
+  claim_status=$(jq -r '"example/test-harness#9013" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_status" "assigned" "dispatch-only rework should leave the claim assigned"
+
+  worker_log=$(jq -r '"example/test-harness#9013" as $k | .[$k].worker_log // ""' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$worker_log" "" "dispatch-only rework should not launch the worker"
+
+  task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9013/task.json")
+  assert_eq "$task_status" "assigned" "dispatch-only rework should stay assigned until the designated worker resumes it"
+
+  assignment_slot=$(jq -r '.assignment.slot // ""' "$REPO_DIR/.harness/tasks/issue-9013/task.json")
+  assert_eq "$assignment_slot" "slot-r" "dispatch-only rework should preserve the assigned slot"
+
+  assignment_channel=$(jq -r '.assignment.channel // ""' "$REPO_DIR/.harness/tasks/issue-9013/task.json")
+  assert_eq "$assignment_channel" "exec-r" "dispatch-only rework should preserve the assigned channel"
+
+  note=$(jq -r '.note // ""' "$REPO_DIR/.harness/tasks/issue-9013/task.json")
+  assert_contains "$note" "assigned to exec-r/slot-r" "dispatch-only rework note should mention the assignment target"
+}
+
+scenario_stale_dispatch_rework_returns_to_rework() {
+  local dispatch_output run_output stale_iso stale_epoch task_status claim_count pr_url note attempts
+
+  setup_fixture "stale-dispatch-rework"
+  write_mock_issue 9019 "Stale dispatch rework issue" '[{"name":"Ready"}]'
+  write_issue_list '[]'
+
+  task_env "$REPO_DIR/scripts/task-start" --issue 9019 --assign-slot slot-r3 --assign-channel exec-r3 >/dev/null
+  jq '
+    .status = "rework"
+    | .pr_url = "https://example.test/pr/9019"
+    | .last_review_verdict = "rework"
+    | .review_rework_attempts = 1
+    | .review_rework_limit = 3
+  ' "$REPO_DIR/.harness/tasks/issue-9019/task.json" > "$REPO_DIR/.harness/tasks/issue-9019/task.json.tmp"
+  mv "$REPO_DIR/.harness/tasks/issue-9019/task.json.tmp" "$REPO_DIR/.harness/tasks/issue-9019/task.json"
+  printf '{}\n' > "$REPO_DIR/.harness/state/claims.json"
+
+  dispatch_output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once" --dispatch-only --assign-slot slot-r3 --assign-channel exec-r3)
+  assert_eq "$dispatch_output" "success: dispatched review rework issue #9019 -> exec-r3/slot-r3" "dispatch-only mode should assign rework to the remote executor slot"
+
+  stale_epoch=$(( $(date -u +%s) - 7200 ))
+  stale_iso=$(date -u -r "$stale_epoch" +"%Y-%m-%dT%H:%M:%SZ")
+  jq --arg claimed_at "$stale_iso" --argjson claimed_epoch "$stale_epoch" '
+    ."example/test-harness#9019".claimed_at = $claimed_at
+    | ."example/test-harness#9019".claimed_epoch = $claimed_epoch
+  ' "$REPO_DIR/.harness/state/claims.json" > "$REPO_DIR/.harness/state/claims.json.tmp"
+  mv "$REPO_DIR/.harness/state/claims.json.tmp" "$REPO_DIR/.harness/state/claims.json"
+
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_CLAIM_TTL_MINUTES="1"
+EOF
+
+  run_output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once")
+  assert_eq "$run_output" "success: requeued review rework issue #9019" "expired dispatch-only rework should return to the rework queue instead of reopening the old PR head"
+
+  task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9019/task.json")
+  assert_eq "$task_status" "rework" "expired dispatch-only rework should remain in rework state"
+
+  attempts=$(jq -r '.review_rework_attempts' "$REPO_DIR/.harness/tasks/issue-9019/task.json")
+  assert_eq "$attempts" "1" "expired dispatch-only rework should preserve the recorded attempt count"
+
+  pr_url=$(jq -r '.pr_url // ""' "$REPO_DIR/.harness/tasks/issue-9019/task.json")
+  assert_eq "$pr_url" "https://example.test/pr/9019" "expired dispatch-only rework should preserve the existing PR linkage"
+
+  note=$(jq -r '.note // ""' "$REPO_DIR/.harness/tasks/issue-9019/task.json")
+  assert_contains "$note" "expired before execution" "expired dispatch-only rework should explain why it returned to rework"
+
+  claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_count" "0" "expired dispatch-only rework should clear the stale claim"
+}
+
+scenario_assigned_claim_expires_to_requeue() {
+  local run_output stale_iso stale_epoch task_status claim_count
+
+  setup_fixture "assigned-ttl"
+  write_mock_issue 9014 "Assigned claim expires to requeue" '[{"name":"Ready"}]'
+  write_issue_list '[]'
+
+  task_env "$REPO_DIR/scripts/task-start" --issue 9014 --assign-slot slot-t --assign-channel exec-t >/dev/null
+
+  stale_epoch=$(( $(date -u +%s) - 7200 ))
+  stale_iso=$(date -u -r "$stale_epoch" +"%Y-%m-%dT%H:%M:%SZ")
+  jq --arg claimed_at "$stale_iso" --argjson claimed_epoch "$stale_epoch" '
+    ."example/test-harness#9014".claimed_at = $claimed_at
+    | ."example/test-harness#9014".claimed_epoch = $claimed_epoch
+  ' "$REPO_DIR/.harness/state/claims.json" > "$REPO_DIR/.harness/state/claims.json.tmp"
+  mv "$REPO_DIR/.harness/state/claims.json.tmp" "$REPO_DIR/.harness/state/claims.json"
+
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_CLAIM_TTL_MINUTES="1"
+EOF
+
+  run_output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once")
+  assert_eq "$run_output" "success: requeued issue #9014 for reassignment" "expired assigned claims should be requeued instead of blocking forever"
+
+  task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9014/task.json")
+  assert_eq "$task_status" "created" "expired assigned claims should return the task to created state"
+
+  claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_count" "0" "expired assigned claims should be cleared from claims.json"
+}
+
+scenario_stale_assigned_with_local_changes_blocks() {
+  local stale_epoch stale_iso run_output exit_code task_status claim_count worktree note
+
+  setup_fixture "assigned-dirty"
+  write_mock_issue 9021 "Assigned claim with local changes" '[{"name":"Ready"}]'
+  write_issue_list '[]'
+
+  task_env "$REPO_DIR/scripts/task-start" --issue 9021 --assign-slot slot-d --assign-channel exec-d >/dev/null
+  worktree=$(jq -r '.worktree' "$REPO_DIR/.harness/tasks/issue-9021/task.json")
+  printf '\nUnlaunched local change.\n' >>"$worktree/README.md"
+
+  stale_epoch=$(( $(date -u +%s) - 7200 ))
+  stale_iso=$(date -u -r "$stale_epoch" +"%Y-%m-%dT%H:%M:%SZ")
+  jq --arg claimed_at "$stale_iso" --argjson claimed_epoch "$stale_epoch" '
+    ."example/test-harness#9021".claimed_at = $claimed_at
+    | ."example/test-harness#9021".claimed_epoch = $claimed_epoch
+  ' "$REPO_DIR/.harness/state/claims.json" > "$REPO_DIR/.harness/state/claims.json.tmp"
+  mv "$REPO_DIR/.harness/state/claims.json.tmp" "$REPO_DIR/.harness/state/claims.json"
+
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_CLAIM_TTL_MINUTES="1"
+EOF
+
+  set +e
+  run_output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once")
+  exit_code=$?
+  set -e
+  assert_eq "$exit_code" "2" "stale assigned tasks with local changes should block instead of auto-publishing"
+  assert_contains "$run_output" "blocked: issue #9021" "stale assigned tasks with local changes should surface a blocked result"
+
+  task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9021/task.json")
+  assert_eq "$task_status" "blocked" "stale assigned tasks with local changes should move to blocked"
+
+  note=$(jq -r '.note // ""' "$REPO_DIR/.harness/tasks/issue-9021/task.json")
+  assert_contains "$note" "manual intervention required" "blocked stale assigned tasks should explain why they were not auto-published"
+
+  claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_count" "0" "blocked stale assigned tasks should clear the stale claim"
+}
+
+scenario_task_start_launch_marks_claim_running() {
+  local pid claim_status task_status output final_status claim_count
+
+  setup_fixture "task-start-launch"
+  write_mock_issue 9015 "Direct launch claim status" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9015,"title":"Direct launch claim status","labels":[{"name":"Ready"}]}]'
+
+  task_env HARNESS_MOCK_CODEX_MODE="sleep-touch-readme" "$REPO_DIR/scripts/task-start" --issue 9015 --assign-slot slot-l --assign-channel exec-l --launch codex >"$FIXTURE_DIR/task-start-launch.out" 2>&1 &
+  pid=$!
+
+  claim_status=""
+  task_status=""
+  for _ in $(seq 1 120); do
+    if [[ -f "$REPO_DIR/.harness/state/claims.json" && -f "$REPO_DIR/.harness/tasks/issue-9015/task.json" ]]; then
+      claim_status=$(jq -r '"example/test-harness#9015" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
+      task_status=$(jq -r '.status // ""' "$REPO_DIR/.harness/tasks/issue-9015/task.json")
+      if [[ "$claim_status" == "in_progress" && "$task_status" == "in_progress" ]]; then
+        break
+      fi
+    fi
+    sleep 0.1
+  done
+
+  assert_eq "$claim_status" "in_progress" "task-start --launch codex should mark the claim running before Codex finishes"
+  assert_eq "$task_status" "in_progress" "task-start --launch codex should mark the task in progress before Codex finishes"
+
+  wait "$pid"
+  output=$(cat "$FIXTURE_DIR/task-start-launch.out")
+  assert_contains "$output" "success: reconciled issue #9015 -> PR https://example.test/pr/9015" "task-start --launch codex should reconcile to pr_open after Codex exits"
+
+  final_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9015/task.json")
+  assert_eq "$final_status" "pr_open" "task-start launch path should reconcile to pr_open"
+
+  claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_count" "0" "task-start launch path should clear the claim after reconciliation"
+}
+
+scenario_task_start_launch_targets_explicit_task() {
+  local output explicit_status older_status older_claim_status
+
+  setup_fixture "task-start-explicit"
+  write_mock_issue 9015 "Explicit launch target" '[{"name":"Ready"}]'
+  write_mock_issue 9016 "Older assigned task" '[{"name":"Ready"}]'
+
+  task_env "$REPO_DIR/scripts/task-start" --issue 9016 --assign-slot slot-m --assign-channel exec-m >/dev/null
+  output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-start" --issue 9015 --assign-slot slot-m --assign-channel exec-m --launch codex)
+  assert_contains "$output" "success: reconciled issue #9015 -> PR https://example.test/pr/9015" "explicit task-start launches should reconcile the requested issue, not an older assigned task on the same slot"
+
+  explicit_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9015/task.json")
+  assert_eq "$explicit_status" "pr_open" "explicit task-start launch should open a PR for the requested issue"
+
+  older_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9016/task.json")
+  assert_eq "$older_status" "assigned" "older assigned work on the same slot should remain assigned"
+
+  older_claim_status=$(jq -r '"example/test-harness#9016" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$older_claim_status" "assigned" "older assigned claim should stay untouched when launching an explicit different issue"
+}
+
+scenario_task_start_launch_reconciles_older_stale_assignment_first() {
+  local output stale_epoch stale_iso older_status explicit_status older_claim_status
+
+  setup_fixture "task-start-stale-explicit"
+  write_mock_issue 9015 "Explicit launch target" '[{"name":"Ready"}]'
+  write_mock_issue 9016 "Older stale assigned task" '[{"name":"Ready"}]'
+
+  task_env "$REPO_DIR/scripts/task-start" --issue 9016 --assign-slot slot-ms --assign-channel exec-ms >/dev/null
+  stale_epoch=$(( $(date -u +%s) - 7200 ))
+  stale_iso=$(date -u -r "$stale_epoch" +"%Y-%m-%dT%H:%M:%SZ")
+  jq --arg claimed_at "$stale_iso" --argjson claimed_epoch "$stale_epoch" '
+    ."example/test-harness#9016".claimed_at = $claimed_at
+    | ."example/test-harness#9016".claimed_epoch = $claimed_epoch
+  ' "$REPO_DIR/.harness/state/claims.json" > "$REPO_DIR/.harness/state/claims.json.tmp"
+  mv "$REPO_DIR/.harness/state/claims.json.tmp" "$REPO_DIR/.harness/state/claims.json"
+
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_CLAIM_TTL_MINUTES="1"
+EOF
+
+  output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-start" --issue 9015 --assign-slot slot-ms --assign-channel exec-ms --launch codex)
+  assert_contains "$output" "success: requeued issue #9016 for reassignment" "explicit launches should reconcile older stale work on the slot before starting new work"
+
+  older_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9016/task.json")
+  assert_eq "$older_status" "created" "older stale assigned work should be requeued before the explicit launch proceeds"
+
+  explicit_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9015/task.json")
+  assert_eq "$explicit_status" "assigned" "explicit requested task should remain assigned when the slot had stale work to reconcile first"
+
+  older_claim_status=$(jq -r '"example/test-harness#9016" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$older_claim_status" "" "older stale claim should be cleared after reconciliation"
+}
+
+scenario_assigned_launch_refreshes_claim_timestamp() {
+  local stale_epoch stale_iso pid running_status refreshed_epoch output final_status claim_count
+
+  setup_fixture "assigned-launch-refresh"
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_EXECUTOR_TIMEOUT_SECONDS="5"
+EOF
+  write_mock_issue 9018 "Assigned launch refreshes claim timestamp" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9018,"title":"Assigned launch refreshes claim timestamp","labels":[{"name":"Ready"}]}]'
+
+  task_env "$REPO_DIR/scripts/task-start" --issue 9018 --assign-slot slot-r2 --assign-channel exec-r2 >/dev/null
+
+  stale_epoch=$(( $(date -u +%s) - 7200 ))
+  stale_iso=$(date -u -r "$stale_epoch" +"%Y-%m-%dT%H:%M:%SZ")
+  jq --arg claimed_at "$stale_iso" --argjson claimed_epoch "$stale_epoch" '
+    ."example/test-harness#9018".claimed_at = $claimed_at
+    | ."example/test-harness#9018".claimed_epoch = $claimed_epoch
+  ' "$REPO_DIR/.harness/state/claims.json" > "$REPO_DIR/.harness/state/claims.json.tmp"
+  mv "$REPO_DIR/.harness/state/claims.json.tmp" "$REPO_DIR/.harness/state/claims.json"
+
+  write_issue_list '[]'
+  task_env HARNESS_MOCK_CODEX_MODE="sleep-touch-readme" "$REPO_DIR/scripts/task-run-once" --assigned-only --assign-slot slot-r2 --assign-channel exec-r2 >"$FIXTURE_DIR/assigned-launch-refresh.out" 2>&1 &
+  pid=$!
+
+  running_status=""
+  refreshed_epoch=""
+  for _ in $(seq 1 120); do
+    running_status=$(jq -r '"example/test-harness#9018" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
+    refreshed_epoch=$(jq -r '"example/test-harness#9018" as $k | .[$k].claimed_epoch // 0' "$REPO_DIR/.harness/state/claims.json")
+    if [[ "$running_status" == "in_progress" ]]; then
+      break
+    fi
+    sleep 0.1
+  done
+
+  assert_eq "$running_status" "in_progress" "assigned-only launch should flip the claim into running state before the worker exits"
+  if [[ "$refreshed_epoch" -le "$stale_epoch" ]]; then
+    printf 'assert failed: running claim timestamp was not refreshed on launch\nold=%s new=%s\n' "$stale_epoch" "$refreshed_epoch" >&2
+    exit 1
+  fi
+
+  wait "$pid"
+  output=$(cat "$FIXTURE_DIR/assigned-launch-refresh.out")
+  assert_eq "$output" "success: reconciled issue #9018 -> PR https://example.test/pr/9018" "assigned-only launch should still reconcile cleanly after refreshing the running claim timestamp"
+
+  final_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9018/task.json")
+  assert_eq "$final_status" "pr_open" "assigned launch refresh scenario should reconcile to pr_open"
+
+  claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_count" "0" "claim should be cleared after assigned launch reconciliation"
+}
+
+scenario_assigned_only_reconciles_stale_in_progress_task() {
+  local stale_epoch stale_iso run_output task_status claim_count worktree
+
+  setup_fixture "assigned-stale-running"
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_EXECUTOR_TIMEOUT_SECONDS="1"
+EOF
+  write_mock_issue 9020 "Assigned stale running issue" '[{"name":"Ready"}]'
+  write_issue_list '[]'
+
+  task_env "$REPO_DIR/scripts/task-start" --issue 9020 --assign-slot slot-s --assign-channel exec-s >/dev/null
+  worktree=$(jq -r '.worktree' "$REPO_DIR/.harness/tasks/issue-9020/task.json")
+  printf '\nStale assigned worker change.\n' >>"$worktree/README.md"
+
+  jq '.status = "in_progress"' "$REPO_DIR/.harness/tasks/issue-9020/task.json" > "$REPO_DIR/.harness/tasks/issue-9020/task.json.tmp"
+  mv "$REPO_DIR/.harness/tasks/issue-9020/task.json.tmp" "$REPO_DIR/.harness/tasks/issue-9020/task.json"
+
+  stale_epoch=$(( $(date -u +%s) - 7200 ))
+  stale_iso=$(date -u -r "$stale_epoch" +"%Y-%m-%dT%H:%M:%SZ")
+  jq --arg claimed_at "$stale_iso" --argjson claimed_epoch "$stale_epoch" '
+    ."example/test-harness#9020".status = "in_progress"
+    | ."example/test-harness#9020".claimed_at = $claimed_at
+    | ."example/test-harness#9020".claimed_epoch = $claimed_epoch
+  ' "$REPO_DIR/.harness/state/claims.json" > "$REPO_DIR/.harness/state/claims.json.tmp"
+  mv "$REPO_DIR/.harness/state/claims.json.tmp" "$REPO_DIR/.harness/state/claims.json"
+
+  run_output=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once" --assigned-only --assign-slot slot-s --assign-channel exec-s)
+  assert_eq "$run_output" "success: reconciled issue #9020 -> PR https://example.test/pr/9020" "assigned-only mode should reconcile a stale running claim before declaring the slot busy"
+
+  task_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9020/task.json")
+  assert_eq "$task_status" "pr_open" "stale assigned running work should reconcile to pr_open"
+
+  claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_count" "0" "stale assigned running claims should be cleared after reconciliation"
+}
+
+scenario_assigned_only_waits_when_slot_busy() {
+  local dispatch_one dispatch_two run_output second_status first_claim_status second_claim_status
+
+  setup_fixture "assigned-busy"
+  write_mock_issue 9016 "Running assigned issue" '[{"name":"Ready"}]'
+  write_mock_issue 9017 "Pending assigned issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9016,"title":"Running assigned issue","labels":[{"name":"Ready"}]},{"number":9017,"title":"Pending assigned issue","labels":[{"name":"Ready"}]}]'
+  cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
+HARNESS_EXECUTOR_ACTIVE_LIMIT="2"
+HARNESS_EXECUTOR_TIMEOUT_SECONDS="600"
+EOF
+
+  dispatch_one=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once" --dispatch-only --assign-slot slot-z --assign-channel exec-z)
+  assert_eq "$dispatch_one" "success: dispatched issue #9016 -> exec-z/slot-z" "first dispatch should assign issue 9016"
+
+  dispatch_two=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once" --dispatch-only --assign-slot slot-z --assign-channel exec-z)
+  assert_eq "$dispatch_two" "success: dispatched issue #9017 -> exec-z/slot-z" "second dispatch should queue a second task for the same assignment when global capacity allows it"
+
+  jq '
+    ."example/test-harness#9016".status = "in_progress"
+  ' "$REPO_DIR/.harness/state/claims.json" > "$REPO_DIR/.harness/state/claims.json.tmp"
+  mv "$REPO_DIR/.harness/state/claims.json.tmp" "$REPO_DIR/.harness/state/claims.json"
+
+  run_output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once" --assigned-only --assign-slot slot-z --assign-channel exec-z)
+  assert_contains "$run_output" "assignment exec-z/slot-z already has active work; task=issue-9016" "assigned-only workers should refuse a second task while the assignment is already running"
+
+  first_claim_status=$(jq -r '"example/test-harness#9016" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$first_claim_status" "in_progress" "the running claim should stay in progress"
+
+  second_claim_status=$(jq -r '"example/test-harness#9017" as $k | .[$k].status // ""' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$second_claim_status" "assigned" "the queued second claim should remain assigned"
+
+  second_status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9017/task.json")
+  assert_eq "$second_status" "assigned" "the queued second task should remain assigned while the slot is busy"
+}
+
+scenario_assigned_only_runs_preassigned_work() {
+  local dispatch_output run_output status claim_count assignment_slot assignment_channel
+
+  setup_fixture "assigned-worker"
+  write_mock_issue 9012 "Assigned execution issue" '[{"name":"Ready"}]'
+  write_issue_list '[{"number":9012,"title":"Assigned execution issue","labels":[{"name":"Ready"}]}]'
+
+  dispatch_output=$(task_env HARNESS_MOCK_CODEX_MODE="no-op" "$REPO_DIR/scripts/task-run-once" --dispatch-only --assign-slot slot-b --assign-channel exec-b)
+  assert_eq "$dispatch_output" "success: dispatched issue #9012 -> exec-b/slot-b" "control tower dispatch should assign work before the executor channel runs"
+
+  write_issue_list '[]'
+  run_output=$(task_env HARNESS_MOCK_CODEX_MODE="touch-readme" "$REPO_DIR/scripts/task-run-once" --assigned-only --assign-slot slot-b --assign-channel exec-b)
+  assert_eq "$run_output" "success: reconciled issue #9012 -> PR https://example.test/pr/9012" "assigned-only mode should execute already-assigned work"
+
+  status=$(jq -r '.status' "$REPO_DIR/.harness/tasks/issue-9012/task.json")
+  assert_eq "$status" "pr_open" "assigned task should reconcile to pr_open"
+
+  claim_count=$(jq 'length' "$REPO_DIR/.harness/state/claims.json")
+  assert_eq "$claim_count" "0" "assigned task claim should be cleared after reconciliation"
+
+  assignment_slot=$(jq -r '.assignment.slot // ""' "$REPO_DIR/.harness/tasks/issue-9012/task.json")
+  assert_eq "$assignment_slot" "slot-b" "task assignment slot should persist after execution"
+
+  assignment_channel=$(jq -r '.assignment.channel // ""' "$REPO_DIR/.harness/tasks/issue-9012/task.json")
+  assert_eq "$assignment_channel" "exec-b" "task assignment channel should persist after execution"
+}
+
 scenario_claim_and_reconcile_to_pr_open
 scenario_waits_when_active_limit_is_full
 scenario_task_start_rechecks_active_limit_under_lock
+scenario_task_start_rejects_local_in_progress_without_claim
+scenario_task_start_rejects_local_assigned_without_claim
+scenario_task_next_skips_local_in_progress_without_claim
+scenario_task_next_skips_local_assigned_without_claim
 scenario_waits_when_queue_empty_but_active_work_remains
 scenario_recovers_stale_in_progress_task
+scenario_dispatch_only_records_assignment
+scenario_assigned_only_does_not_fetch_queue
+scenario_assigned_only_runs_preassigned_work
+scenario_dispatch_only_rework_stays_assigned
+scenario_stale_dispatch_rework_returns_to_rework
+scenario_assigned_claim_expires_to_requeue
+scenario_stale_assigned_with_local_changes_blocks
+scenario_task_start_launch_marks_claim_running
+scenario_task_start_launch_targets_explicit_task
+scenario_task_start_launch_reconciles_older_stale_assignment_first
+scenario_assigned_launch_refreshes_claim_timestamp
+scenario_assigned_only_reconciles_stale_in_progress_task
+scenario_assigned_only_waits_when_slot_busy
 scenario_blocks_stale_base_handoff
 
 printf 'check-task-run-once passed\n'

@@ -47,7 +47,8 @@ resolve_base_ref() {
     source "$project_env"
   fi
 
-  : "${HARNESS_BASE_BRANCH:=main}"
+  : "${HARNESS_INTEGRATION_BRANCH:=${HARNESS_BASE_BRANCH:-main}}"
+  : "${HARNESS_BASE_BRANCH:=$HARNESS_INTEGRATION_BRANCH}"
 
   if [[ -n "$base_ref" ]]; then
     printf '%s\n' "$base_ref"

@@ -9,6 +9,12 @@ source "$SCRIPT_DIR/harness-lib.sh"
 label_filter=""
 log_file=""
 dry_run=0
+assigned_only=0
+dispatch_only=0
+assignment_slot=""
+assignment_channel=""
+assigned_by="task-run-once"
+explicit_task_id=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -24,9 +30,33 @@ while [[ $# -gt 0 ]]; do
       dry_run=1
       shift
       ;;
+    --assigned-only)
+      assigned_only=1
+      shift
+      ;;
+    --dispatch-only)
+      dispatch_only=1
+      shift
+      ;;
+    --assign-slot)
+      assignment_slot="${2:-}"
+      shift 2
+      ;;
+    --assign-channel)
+      assignment_channel="${2:-}"
+      shift 2
+      ;;
+    --assigned-by)
+      assigned_by="${2:-}"
+      shift 2
+      ;;
+    --task-id)
+      explicit_task_id="${2:-}"
+      shift 2
+      ;;
     -h|--help)
       cat <<'EOF'
-usage: scripts/task-run-once [--label <label>] [--log-file <path>] [--dry-run]
+usage: scripts/task-run-once [--label <label>] [--log-file <path>] [--dry-run] [--assigned-only | --dispatch-only] [--assign-slot <slot>] [--assign-channel <channel>] [--assigned-by <name>] [--task-id <id>]
 EOF
       exit 0
       ;;
@@ -38,6 +68,12 @@ done
 
 harness_load_project_env
 harness_prepare_state
+assignment_slot=$(harness_resolve_assignment_slot "$assignment_slot")
+assignment_channel=$(harness_resolve_assignment_channel "$assignment_channel")
+
+if [[ "$assigned_only" -eq 1 && "$dispatch_only" -eq 1 ]]; then
+  harness_die "--assigned-only and --dispatch-only cannot be combined"
+fi
 
 if [[ -z "$label_filter" ]]; then
   label_filter="$HARNESS_AUTONOMOUS_LABEL"
@@ -46,6 +82,10 @@ fi
 if [[ -z "$log_file" ]]; then
   log_file="$HARNESS_LOG_DIR/task-run-once.jsonl"
 fi
+
+assignment_ref() {
+  printf '%s/%s\n' "$assignment_channel" "$assignment_slot"
+}
 
 emit_log() {
   local status="$1"
@@ -109,7 +149,8 @@ task_snapshot_by_id() {
     --arg claim_key "$claim_key" \
     --argjson task "$task_json" \
     --argjson claim "$claim_json" '
-      $task + {
+      ($task + {
+        assignment: ($task.assignment // $claim.assignment // null),
         claim_key: $claim_key,
         claim_status: ($claim.status // ""),
         claimed_at: ($claim.claimed_at // ""),
@@ -117,7 +158,7 @@ task_snapshot_by_id() {
         claim_note: ($claim.note // ""),
         worker_log: ($claim.worker_log // ""),
         worker_exit: ($claim.worker_exit // "")
-      }
+      })
     '
 }
 
@@ -135,9 +176,13 @@ active_tasks_json() {
 
   snapshots=()
   for task_json in "${task_files[@]}"; do
-    if [[ "$(jq -r '.status // ""' "$task_json")" != "in_progress" ]]; then
-      continue
-    fi
+    case "$(jq -r '.status // ""' "$task_json")" in
+      assigned|in_progress)
+        ;;
+      *)
+        continue
+        ;;
+    esac
     task_id=$(jq -r '.task_id' "$task_json")
     snapshots+=("$(task_snapshot_by_id "$task_id")")
   done
@@ -150,6 +195,20 @@ active_tasks_json() {
   printf '%s\n' "${snapshots[@]}" | jq -s '
     sort_by(.claimed_epoch // 0, .updated_at // .created_at)
   '
+}
+
+filter_assigned_tasks_json() {
+  local active_json="$1"
+
+  printf '%s' "$active_json" | jq -c \
+    --arg assignment_slot "$assignment_slot" \
+    --arg assignment_channel "$assignment_channel" '
+      [
+        .[]
+        | select((.assignment.slot // "") == $assignment_slot)
+        | select((.assignment.channel // "") == $assignment_channel)
+      ]
+    '
 }
 
 classify_active_task() {
@@ -170,6 +229,22 @@ classify_active_task() {
     return 0
   fi
 
+  if [[ "$claim_status" == "assigned" ]]; then
+    if [[ "$HARNESS_CLAIM_TTL_MINUTES" =~ ^[0-9]+$ ]] \
+      && [[ "$HARNESS_CLAIM_TTL_MINUTES" -gt 0 ]] \
+      && [[ "$claimed_epoch" =~ ^[0-9]+$ ]] \
+      && [[ "$claimed_epoch" -gt 0 ]]; then
+      now_epoch=$(date -u +%s)
+      age=$((now_epoch - claimed_epoch))
+      if (( age >= HARNESS_CLAIM_TTL_MINUTES * 60 )); then
+        printf 'reconciling\n'
+        return 0
+      fi
+    fi
+    printf 'assigned\n'
+    return 0
+  fi
+
   if [[ "$HARNESS_EXECUTOR_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] \
     && [[ "$HARNESS_EXECUTOR_TIMEOUT_SECONDS" -gt 0 ]] \
     && [[ "$claimed_epoch" =~ ^[0-9]+$ ]] \
@@ -187,14 +262,18 @@ classify_active_task() {
 
 active_summary() {
   local active_json="$1"
-  local task_json state running reconciling total
+  local task_json state assigned running reconciling total
 
+  assigned=0
   running=0
   reconciling=0
   while IFS= read -r task_json; do
     [[ -n "$task_json" ]] || continue
     state=$(classify_active_task "$task_json")
     case "$state" in
+      assigned)
+        assigned=$((assigned + 1))
+        ;;
       running)
         running=$((running + 1))
         ;;
@@ -204,9 +283,27 @@ active_summary() {
     esac
   done < <(printf '%s' "$active_json" | jq -c '.[]')
 
-  total=$((running + reconciling))
-  printf 'running=%s reconciling=%s total=%s limit=%s\n' \
-    "$running" "$reconciling" "$total" "$HARNESS_EXECUTOR_ACTIVE_LIMIT"
+  total=$((assigned + running + reconciling))
+  printf 'assigned=%s running=%s reconciling=%s total=%s limit=%s\n' \
+    "$assigned" "$running" "$reconciling" "$total" "$HARNESS_EXECUTOR_ACTIVE_LIMIT"
+}
+
+active_limit_count() {
+  local active_json="$1"
+  local task_json state total
+
+  total=0
+  while IFS= read -r task_json; do
+    [[ -n "$task_json" ]] || continue
+    state=$(classify_active_task "$task_json")
+    case "$state" in
+      running|reconciling)
+        total=$((total + 1))
+        ;;
+    esac
+  done < <(printf '%s' "$active_json" | jq -c '.[]')
+
+  printf '%s\n' "$total"
 }
 
 find_reconcilable_active_task() {
@@ -216,6 +313,72 @@ find_reconcilable_active_task() {
   while IFS= read -r task_json; do
     [[ -n "$task_json" ]] || continue
     if [[ "$(classify_active_task "$task_json")" == "reconciling" ]]; then
+      printf '%s\n' "$task_json"
+      return 0
+    fi
+  done < <(printf '%s' "$active_json" | jq -c '.[]')
+
+  return 1
+}
+
+find_assigned_pending_task() {
+  local active_json="$1"
+  local task_json
+
+  while IFS= read -r task_json; do
+    [[ -n "$task_json" ]] || continue
+    if [[ "$(classify_active_task "$task_json")" == "assigned" ]]; then
+      printf '%s\n' "$task_json"
+      return 0
+    fi
+  done < <(printf '%s' "$active_json" | jq -c '.[]')
+
+  return 1
+}
+
+find_task_by_id() {
+  local active_json="$1"
+  local target_task_id="$2"
+  local task_json
+
+  while IFS= read -r task_json; do
+    [[ -n "$task_json" ]] || continue
+    if [[ "$(printf '%s' "$task_json" | jq -r '.task_id // ""')" == "$target_task_id" ]]; then
+      printf '%s\n' "$task_json"
+      return 0
+    fi
+  done < <(printf '%s' "$active_json" | jq -c '.[]')
+
+  return 1
+}
+
+find_running_task_excluding() {
+  local active_json="$1"
+  local exclude_task_id="$2"
+  local task_json task_id
+
+  while IFS= read -r task_json; do
+    [[ -n "$task_json" ]] || continue
+    task_id=$(printf '%s' "$task_json" | jq -r '.task_id // ""')
+    if [[ -n "$exclude_task_id" && "$task_id" == "$exclude_task_id" ]]; then
+      continue
+    fi
+    if [[ "$(classify_active_task "$task_json")" == "running" ]]; then
+      printf '%s\n' "$task_json"
+      return 0
+    fi
+  done < <(printf '%s' "$active_json" | jq -c '.[]')
+
+  return 1
+}
+
+find_explicit_running_task() {
+  local active_json="$1"
+  local task_json
+
+  while IFS= read -r task_json; do
+    [[ -n "$task_json" ]] || continue
+    if [[ "$(classify_active_task "$task_json")" == "running" ]]; then
       printf '%s\n' "$task_json"
       return 0
     fi
@@ -237,7 +400,8 @@ collect_changed_files() {
 reconcile_task() {
   local task_json="$1"
   local issue_number task_id title worktree branch base_branch base_remote_ref base_sha repo_slug claim_key worker_log
-  local task_json_path status pr_url note ahead_count recovery_reason sync_reason
+  local task_json_path status pr_url note ahead_count recovery_reason sync_reason claim_status assignment_slot assignment_channel
+  local review_rework_attempts last_review_verdict task_assignment_ref
   local -a changed_files
 
   issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // ""')
@@ -251,6 +415,12 @@ reconcile_task() {
   repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
   claim_key=$(printf '%s' "$task_json" | jq -r '.claim_key // ""')
   worker_log=$(printf '%s' "$task_json" | jq -r '.worker_log // ""')
+  claim_status=$(printf '%s' "$task_json" | jq -r '.claim_status // ""')
+  assignment_slot=$(printf '%s' "$task_json" | jq -r '.assignment.slot // ""')
+  assignment_channel=$(printf '%s' "$task_json" | jq -r '.assignment.channel // ""')
+  review_rework_attempts=$(printf '%s' "$task_json" | jq -r '.review_rework_attempts // 0')
+  last_review_verdict=$(printf '%s' "$task_json" | jq -r '.last_review_verdict // ""')
+  task_assignment_ref="${assignment_channel}/${assignment_slot}"
   task_json_path=$(harness_task_status_path "$task_id")
 
   if [[ -n "$claim_key" ]]; then
@@ -270,53 +440,69 @@ reconcile_task() {
           harness_remove_claim "$claim_key"
         fi
         ;;
-      in_progress|created|unknown)
+      assigned|in_progress|created|unknown)
         changed_files=()
         while IFS= read -r changed_file; do
           [[ -n "$changed_file" ]] || continue
           changed_files+=("$changed_file")
         done < <(collect_changed_files "$worktree")
-        if [[ "${#changed_files[@]}" -gt 0 ]]; then
-          git -C "$worktree" add -- "${changed_files[@]}"
-          git -C "$worktree" commit -m "fix: address issue #$issue_number" >/dev/null 2>&1 || true
-        fi
 
-        if sync_reason=$(harness_task_base_sync_reason "$task_id" 2>/dev/null); then
-          if [[ -n "$base_remote_ref" ]]; then
-            ahead_count=$(git -C "$worktree" rev-list --count "${base_remote_ref}..HEAD" 2>/dev/null || echo 0)
-          elif [[ -n "$base_sha" ]]; then
-            ahead_count=$(git -C "$worktree" rev-list --count "${base_sha}..HEAD" 2>/dev/null || echo 0)
-          else
-            ahead_count=$(git -C "$worktree" rev-list --count "${base_branch}..HEAD" 2>/dev/null || echo 0)
-          fi
-          if [[ "${ahead_count:-0}" -gt 0 ]]; then
-            if git -C "$worktree" push -u origin "$branch" >/dev/null 2>&1; then
-              if [[ -z "$pr_url" ]]; then
-                pr_url=$(gh pr create -R "$repo_slug" --base "$base_branch" --head "$branch" --title "$title" --body-file "$(harness_task_dir "$task_id")/PR_BODY.md" 2>/dev/null || true)
-                if [[ -z "$pr_url" ]]; then
-                  pr_url=$(gh pr list -R "$repo_slug" --head "$branch" --json url --jq '.[0].url // ""' 2>/dev/null || true)
-                fi
-              fi
-
-              if [[ -n "$pr_url" ]]; then
-                "$SCRIPT_DIR/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null 2>&1 || true
-              else
-                recovery_reason="executor reconcile pushed branch but could not open PR; branch=$branch"
-                "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
-              fi
-            else
-              recovery_reason="executor reconcile could not push branch $branch"
-              "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
-            fi
-          elif [[ -n "$pr_url" ]]; then
-            "$SCRIPT_DIR/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null 2>&1 || true
-          else
-            recovery_reason="executor reconcile found no commits, PR, or explicit task-finish; log=${worker_log:-unknown}"
+        if [[ ( -z "$claim_status" || "$claim_status" == "assigned" ) && -n "$assignment_slot" && -n "$assignment_channel" ]]; then
+          if [[ "${#changed_files[@]}" -gt 0 ]]; then
+            recovery_reason="assigned task expired before execution with local changes; manual intervention required: $worktree"
             "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
+          elif [[ "$last_review_verdict" == "rework" || "${review_rework_attempts:-0}" -gt 0 ]]; then
+            if [[ -n "$claim_key" ]]; then
+              harness_remove_claim "$claim_key"
+            fi
+            recovery_reason="automatic review rework assignment expired before execution; returned to rework queue from $task_assignment_ref"
+            harness_update_task_status "$task_id" "rework" "$recovery_reason" "$pr_url"
+          else
+            "$SCRIPT_DIR/task-finish" --issue "$issue_number" --unclaim >/dev/null 2>&1 || true
           fi
         else
-          recovery_reason="$sync_reason"
-          "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
+          if [[ "${#changed_files[@]}" -gt 0 ]]; then
+            git -C "$worktree" add -- "${changed_files[@]}"
+            git -C "$worktree" commit -m "fix: address issue #$issue_number" >/dev/null 2>&1 || true
+          fi
+
+          if sync_reason=$(harness_task_base_sync_reason "$task_id" 2>/dev/null); then
+            if [[ -n "$base_remote_ref" ]]; then
+              ahead_count=$(git -C "$worktree" rev-list --count "${base_remote_ref}..HEAD" 2>/dev/null || echo 0)
+            elif [[ -n "$base_sha" ]]; then
+              ahead_count=$(git -C "$worktree" rev-list --count "${base_sha}..HEAD" 2>/dev/null || echo 0)
+            else
+              ahead_count=$(git -C "$worktree" rev-list --count "${base_branch}..HEAD" 2>/dev/null || echo 0)
+            fi
+            if [[ "${ahead_count:-0}" -gt 0 ]]; then
+              if git -C "$worktree" push -u origin "$branch" >/dev/null 2>&1; then
+                if [[ -z "$pr_url" ]]; then
+                  pr_url=$(gh pr create -R "$repo_slug" --base "$base_branch" --head "$branch" --title "$title" --body-file "$(harness_task_dir "$task_id")/PR_BODY.md" 2>/dev/null || true)
+                  if [[ -z "$pr_url" ]]; then
+                    pr_url=$(gh pr list -R "$repo_slug" --head "$branch" --json url --jq '.[0].url // ""' 2>/dev/null || true)
+                  fi
+                fi
+
+                if [[ -n "$pr_url" ]]; then
+                  "$SCRIPT_DIR/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null 2>&1 || true
+                else
+                  recovery_reason="executor reconcile pushed branch but could not open PR; branch=$branch"
+                  "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
+                fi
+              else
+                recovery_reason="executor reconcile could not push branch $branch"
+                "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
+              fi
+            elif [[ -n "$pr_url" ]]; then
+              "$SCRIPT_DIR/task-finish" --issue "$issue_number" --pr "$pr_url" >/dev/null 2>&1 || true
+            else
+              recovery_reason="executor reconcile found no commits, PR, or explicit task-finish; log=${worker_log:-unknown}"
+              "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
+            fi
+          else
+            recovery_reason="$sync_reason"
+            "$SCRIPT_DIR/task-finish" --issue "$issue_number" --blocked "$recovery_reason" >/dev/null 2>&1 || true
+          fi
         fi
         ;;
     esac
@@ -337,6 +523,16 @@ reconcile_task() {
       printf 'success: reconciled issue #%s -> done\n' "$issue_number"
       return 0
       ;;
+    created)
+      emit_log "success" "requeued stale assigned task" "$issue_number" "$task_id" "$note"
+      printf 'success: requeued issue #%s for reassignment\n' "$issue_number"
+      return 0
+      ;;
+    rework)
+      emit_log "success" "requeued stale assigned review rework" "$issue_number" "$task_id" "$note"
+      printf 'success: requeued review rework issue #%s\n' "$issue_number"
+      return 0
+      ;;
     blocked)
       emit_log "blocked" "reconciled active task to blocked" "$issue_number" "$task_id" "$note"
       printf 'blocked: issue #%s -> %s\n' "$issue_number" "$note"
@@ -353,6 +549,13 @@ reconcile_task() {
       return 1
       ;;
   esac
+}
+
+run_worker_for_task() {
+  local task_json="$1"
+  task_id=$(printf '%s' "$task_json" | jq -r '.task_id')
+  harness_record_stage_summary "$task_id" "executor" "started" "Executor started a Codex worker for the assigned task."
+  launch_worker_for_task "$(harness_task_status_path "$task_id")" "assigned task launching Codex"
 }
 
 launch_worker_for_task() {
@@ -381,6 +584,7 @@ launch_worker_for_task() {
   fi
 
   emit_log "claimed" "$launch_message" "$issue_number" "$task_id" "$title"
+  harness_update_task_status "$task_id" "in_progress"
   harness_update_claim_status "$claim_key" "in_progress" "executor running" "$worker_log"
 
   worker_prompt=$(cat <<EOF
@@ -402,10 +606,18 @@ EOF
 )
 
   worker_exit=0
-  if (cd "$worktree" && harness_run_with_timeout "$HARNESS_EXECUTOR_TIMEOUT_SECONDS" env "${codex_env[@]}" codex exec --disable child_agents_md --full-auto "$worker_prompt") >"$worker_log" 2>&1; then
-    worker_exit=0
+  if [[ "${#codex_env[@]}" -gt 0 ]]; then
+    if (cd "$worktree" && harness_run_with_timeout "$HARNESS_EXECUTOR_TIMEOUT_SECONDS" env "${codex_env[@]}" codex exec --disable child_agents_md --full-auto "$worker_prompt") >"$worker_log" 2>&1; then
+      worker_exit=0
+    else
+      worker_exit=$?
+    fi
   else
-    worker_exit=$?
+    if (cd "$worktree" && harness_run_with_timeout "$HARNESS_EXECUTOR_TIMEOUT_SECONDS" codex exec --disable child_agents_md --full-auto "$worker_prompt") >"$worker_log" 2>&1; then
+      worker_exit=0
+    else
+      worker_exit=$?
+    fi
   fi
 
   harness_update_claim_status "$claim_key" "reconciling" "executor exited with code $worker_exit" "$worker_log" "$worker_exit"
@@ -434,11 +646,127 @@ EOF
   esac
 
   reconcile_task "$task_snapshot"
+  return $?
 }
 
 active_tasks=$(active_tasks_json)
-active_total=$(printf '%s' "$active_tasks" | jq 'length')
+tracked_total=$(printf '%s' "$active_tasks" | jq 'length')
+active_limit_total=$(active_limit_count "$active_tasks")
 active_summary_text=$(active_summary "$active_tasks")
+
+if [[ "$assigned_only" -eq 1 ]]; then
+  assigned_tasks=$(filter_assigned_tasks_json "$active_tasks")
+  assigned_total=$(printf '%s' "$assigned_tasks" | jq 'length')
+  assigned_summary_text=$(active_summary "$assigned_tasks")
+
+  if [[ -n "$explicit_task_id" ]]; then
+    if explicit_task=$(find_task_by_id "$assigned_tasks" "$explicit_task_id" 2>/dev/null); then
+      if reconcilable_task=$(find_reconcilable_active_task "$assigned_tasks" 2>/dev/null); then
+        reconcile_issue_number=$(printf '%s' "$reconcilable_task" | jq -r '.issue_number // ""')
+        reconcile_task_id=$(printf '%s' "$reconcilable_task" | jq -r '.task_id')
+        if [[ "$reconcile_task_id" != "$explicit_task_id" ]]; then
+          if [[ "$dry_run" -eq 1 ]]; then
+            waiting_detail="assigned task $reconcile_task_id on $(assignment_ref) requires reconciliation before launching $explicit_task_id; $assigned_summary_text"
+            emit_log "waiting" "assigned task requires reconciliation" "$reconcile_issue_number" "$reconcile_task_id" "$waiting_detail"
+            printf 'waiting: %s\n' "$waiting_detail"
+            exit 0
+          fi
+          reconcile_task "$reconcilable_task"
+          exit $?
+        fi
+      fi
+
+      if running_task=$(find_running_task_excluding "$assigned_tasks" "$explicit_task_id" 2>/dev/null); then
+        running_task_id=$(printf '%s' "$running_task" | jq -r '.task_id // ""')
+        waiting_detail="assignment $(assignment_ref) already has active work; task=$running_task_id; $assigned_summary_text"
+        emit_log "waiting" "assignment already busy" "" "$running_task_id" "$waiting_detail"
+        printf 'waiting: %s\n' "$waiting_detail"
+        exit 0
+      fi
+
+      explicit_state=$(classify_active_task "$explicit_task")
+      issue_number=$(printf '%s' "$explicit_task" | jq -r '.issue_number // ""')
+      title=$(printf '%s' "$explicit_task" | jq -r '.title')
+      task_id=$(printf '%s' "$explicit_task" | jq -r '.task_id')
+      case "$explicit_state" in
+        reconciling)
+          if [[ "$dry_run" -eq 1 ]]; then
+            waiting_detail="assigned task $task_id on $(assignment_ref) requires reconciliation before any new run; $assigned_summary_text"
+            emit_log "waiting" "assigned task requires reconciliation" "$issue_number" "$task_id" "$waiting_detail"
+            printf 'waiting: %s\n' "$waiting_detail"
+            exit 0
+          fi
+          reconcile_task "$explicit_task"
+          exit $?
+          ;;
+        running)
+          waiting_detail="requested task $task_id is already running on $(assignment_ref); $assigned_summary_text"
+          emit_log "waiting" "requested task already running" "$issue_number" "$task_id" "$waiting_detail"
+          printf 'waiting: %s\n' "$waiting_detail"
+          exit 0
+          ;;
+        assigned)
+          if [[ "$dry_run" -eq 1 ]]; then
+            emit_log "selected" "dry-run selected explicit assigned task" "$issue_number" "$task_id" "$(assignment_ref): $title"
+            printf 'selected assigned issue #%s for %s: %s\n' "$issue_number" "$(assignment_ref)" "$title"
+            exit 0
+          fi
+          run_worker_for_task "$explicit_task"
+          exit $?
+          ;;
+      esac
+    else
+      harness_die "requested task $explicit_task_id is not assigned to $(assignment_ref)"
+    fi
+  fi
+
+  if running_task=$(find_explicit_running_task "$assigned_tasks" 2>/dev/null); then
+    running_task_id=$(printf '%s' "$running_task" | jq -r '.task_id // ""')
+    waiting_detail="assignment $(assignment_ref) already has active work; task=$running_task_id; $assigned_summary_text"
+    emit_log "waiting" "assignment already busy" "" "$running_task_id" "$waiting_detail"
+    printf 'waiting: %s\n' "$waiting_detail"
+    exit 0
+  fi
+
+  if reconcilable_task=$(find_reconcilable_active_task "$assigned_tasks" 2>/dev/null); then
+    reconcile_issue_number=$(printf '%s' "$reconcilable_task" | jq -r '.issue_number // ""')
+    reconcile_task_id=$(printf '%s' "$reconcilable_task" | jq -r '.task_id')
+    if [[ "$dry_run" -eq 1 ]]; then
+      waiting_detail="assigned task $reconcile_task_id on $(assignment_ref) requires reconciliation before any new run; $assigned_summary_text"
+      emit_log "waiting" "assigned task requires reconciliation" "$reconcile_issue_number" "$reconcile_task_id" "$waiting_detail"
+      printf 'waiting: %s\n' "$waiting_detail"
+      exit 0
+    fi
+    reconcile_task "$reconcilable_task"
+    exit $?
+  fi
+
+  if pending_task=$(find_assigned_pending_task "$assigned_tasks" 2>/dev/null); then
+    issue_number=$(printf '%s' "$pending_task" | jq -r '.issue_number // ""')
+    title=$(printf '%s' "$pending_task" | jq -r '.title')
+    task_id=$(printf '%s' "$pending_task" | jq -r '.task_id')
+    if [[ "$dry_run" -eq 1 ]]; then
+      emit_log "selected" "dry-run selected assigned task" "$issue_number" "$task_id" "$(assignment_ref): $title"
+      printf 'selected assigned issue #%s for %s: %s\n' "$issue_number" "$(assignment_ref)" "$title"
+      exit 0
+    fi
+    run_worker_for_task "$pending_task"
+    exit $?
+  fi
+
+  if [[ "$assigned_total" -gt 0 ]]; then
+    running_task_id=$(printf '%s' "$assigned_tasks" | jq -r '.[0].task_id // ""')
+    waiting_detail="assignment $(assignment_ref) already has active work; task=$running_task_id; $assigned_summary_text"
+    emit_log "waiting" "assignment already busy" "" "$running_task_id" "$waiting_detail"
+    printf 'waiting: %s\n' "$waiting_detail"
+    exit 0
+  fi
+
+  idle_detail="no task assigned to $(assignment_ref)"
+  emit_log "idle" "assignment idle" "" "" "$idle_detail"
+  printf 'idle: %s\n' "$idle_detail"
+  exit 0
+fi
 
 if reconcilable_task=$(find_reconcilable_active_task "$active_tasks" 2>/dev/null); then
   reconcile_issue_number=$(printf '%s' "$reconcilable_task" | jq -r '.issue_number // ""')
@@ -449,11 +777,8 @@ if reconcilable_task=$(find_reconcilable_active_task "$active_tasks" 2>/dev/null
     printf 'waiting: %s\n' "$waiting_detail"
     exit 0
   fi
-  if reconcile_task "$reconcilable_task"; then
-    exit 0
-  else
-    exit $?
-  fi
+  reconcile_task "$reconcilable_task"
+  exit $?
 fi
 
 next_rework_task=$(harness_find_next_task_by_status "rework" || true)
@@ -461,7 +786,7 @@ if [[ -n "$next_rework_task" ]]; then
   rework_issue_number=$(printf '%s' "$next_rework_task" | jq -r '.issue_number // ""')
   rework_task_id=$(printf '%s' "$next_rework_task" | jq -r '.task_id')
   rework_title=$(printf '%s' "$next_rework_task" | jq -r '.title')
-  if (( active_total >= HARNESS_EXECUTOR_ACTIVE_LIMIT )); then
+  if (( active_limit_total >= HARNESS_EXECUTOR_ACTIVE_LIMIT )); then
     waiting_detail="active limit reached before resuming review rework for $rework_task_id; $active_summary_text"
     emit_log "waiting" "active limit reached before rework" "$rework_issue_number" "$rework_task_id" "$waiting_detail"
     printf 'waiting: %s\n' "$waiting_detail"
@@ -482,21 +807,30 @@ if [[ -n "$next_rework_task" ]]; then
   rework_attempts=$(jq -r '.review_rework_attempts // 0' "$task_json_path")
   rework_limit=$(jq -r '.review_rework_limit // 3' "$task_json_path")
   claim_key=$(harness_claim_key "$repo_slug" "$rework_issue_number" "$rework_task_id")
+
+  if [[ "$dispatch_only" -eq 1 ]]; then
+    harness_set_task_assignment "$rework_task_id" "$assignment_slot" "$assignment_channel" "$assigned_by"
+    harness_write_claim "$claim_key" "$repo_slug" "$rework_issue_number" "$rework_task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "assigned" "$assignment_slot" "$assignment_channel" "$assigned_by"
+    harness_update_task_status "$rework_task_id" "assigned" "automatic review rework attempt $rework_attempts of $rework_limit assigned to $(assignment_ref)" "$pr_url"
+    harness_record_stage_summary "$rework_task_id" "executor" "started" "Executor assigned automatic review rework attempt $rework_attempts of $rework_limit to $(assignment_ref) without launching it locally." "$pr_url"
+    dispatch_detail="assigned review rework issue #$rework_issue_number to $(assignment_ref)"
+    emit_log "success" "dispatched review rework to assignment" "$rework_issue_number" "$rework_task_id" "$dispatch_detail"
+    printf 'success: dispatched review rework issue #%s -> %s\n' "$rework_issue_number" "$(assignment_ref)"
+    exit 0
+  fi
+
   harness_write_claim "$claim_key" "$repo_slug" "$rework_issue_number" "$rework_task_id" "$branch" "$worktree" "$HARNESS_AGENT_DEFAULT" "in_progress"
   harness_update_task_status "$rework_task_id" "in_progress" "automatic review rework attempt $rework_attempts of $rework_limit in progress" "$pr_url"
   harness_record_stage_summary "$rework_task_id" "executor" "started" "Executor started automatic review rework attempt $rework_attempts of $rework_limit on the existing PR branch." "$pr_url"
 
-  if launch_worker_for_task "$task_json_path" "resumed automatic review rework"; then
-    exit 0
-  else
-    exit $?
-  fi
+  launch_worker_for_task "$task_json_path" "resumed automatic review rework"
+  exit $?
 fi
 
 if ! next_output=$(next_issue_json 2>&1); then
   if [[ "$next_output" == *"no eligible issue found"* ]]; then
-    if [[ "$active_total" -gt 0 ]]; then
-      waiting_detail="ready queue empty; active work still running/reconciling; $active_summary_text"
+    if [[ "$tracked_total" -gt 0 ]]; then
+      waiting_detail="ready queue empty; active work still assigned/running/reconciling; $active_summary_text"
       emit_log "waiting" "ready queue empty but active work remains" "" "" "$waiting_detail"
       printf 'waiting: %s\n' "$waiting_detail"
       exit 0
@@ -517,7 +851,7 @@ issue_number=$(printf '%s' "$next_output" | jq -r '.number')
 title=$(printf '%s' "$next_output" | jq -r '.title')
 task_id="issue-$issue_number"
 
-if (( active_total >= HARNESS_EXECUTOR_ACTIVE_LIMIT )); then
+if (( active_limit_total >= HARNESS_EXECUTOR_ACTIVE_LIMIT )); then
   waiting_detail="active limit reached before claiming issue #$issue_number; $active_summary_text"
   emit_log "waiting" "active limit reached before claim" "$issue_number" "$task_id" "$waiting_detail"
   printf 'waiting: %s\n' "$waiting_detail"
@@ -530,7 +864,7 @@ if [[ "$dry_run" -eq 1 ]]; then
   exit 0
 fi
 
-if ! start_output=$("$SCRIPT_DIR/task-start" --issue "$issue_number" --enforce-active-limit 2>&1); then
+if ! start_output=$("$SCRIPT_DIR/task-start" --issue "$issue_number" --assign-slot "$assignment_slot" --assign-channel "$assignment_channel" --assigned-by "$assigned_by" --enforce-active-limit 2>&1); then
   if [[ "$start_output" == *"active executor limit reached:"* ]]; then
     waiting_detail="active limit reached during claim for issue #$issue_number; $active_summary_text"
     emit_log "waiting" "active limit reached during claim" "$issue_number" "$task_id" "$waiting_detail"
@@ -548,11 +882,15 @@ if ! start_output=$("$SCRIPT_DIR/task-start" --issue "$issue_number" --enforce-a
   exit 1
 fi
 
+if [[ "$dispatch_only" -eq 1 ]]; then
+  dispatch_detail="assigned issue #$issue_number to $(assignment_ref)"
+  emit_log "success" "dispatched issue to assignment" "$issue_number" "$task_id" "$dispatch_detail"
+  printf 'success: dispatched issue #%s -> %s\n' "$issue_number" "$(assignment_ref)"
+  exit 0
+fi
+
 task_json_path=$(harness_task_status_path "$task_id")
 [[ -f "$task_json_path" ]] || harness_die "missing task.json for $task_id"
 harness_record_stage_summary "$task_id" "executor" "started" "Executor started a Codex worker and requires a fresh remote-base sync before handoff."
-if launch_worker_for_task "$task_json_path" "claimed issue and launching Codex"; then
-  exit 0
-else
-  exit $?
-fi
+launch_worker_for_task "$task_json_path" "claimed issue and launching Codex"
+exit $?

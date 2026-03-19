@@ -45,8 +45,9 @@ Primary commands:
 - review lane tick: \`${scripts_rel}/task-review-once\`
 - prepare lane tick: \`${scripts_rel}/task-prepare-once\`
 - land lane tick: \`${scripts_rel}/task-land-once\`
-- start next issue: \`${scripts_rel}/task-start --next\`
-- start explicit issue: \`${scripts_rel}/task-start --issue <n>\`
+- start next issue locally with Codex: \`${scripts_rel}/task-start --next --launch codex\`
+- start explicit issue locally with Codex: \`${scripts_rel}/task-start --issue <n> --launch codex\`
+- claim/assign an issue without launching a worker: \`${scripts_rel}/task-start --issue <n>\`
 - mark PR open: \`${scripts_rel}/task-finish --issue <n> --pr <url>\`
 - mark blocked: \`${scripts_rel}/task-finish --issue <n> --blocked "<reason>"\`
 - mark merged: \`${scripts_rel}/task-finish --issue <n> --merged --pr <url>\`

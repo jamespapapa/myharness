@@ -42,8 +42,9 @@
 - Review lane cycle: `__SCRIPTS_DIR__/task-review-once`
 - Prepare lane cycle: `__SCRIPTS_DIR__/task-prepare-once`
 - Land lane cycle: `__SCRIPTS_DIR__/task-land-once`
-- Claim and create task workspace: `__SCRIPTS_DIR__/task-start --issue <n>`
-- Claim next eligible issue: `__SCRIPTS_DIR__/task-start --next`
+- Start an explicit issue locally with Codex: `__SCRIPTS_DIR__/task-start --issue <n> --launch codex`
+- Start the next eligible issue locally with Codex: `__SCRIPTS_DIR__/task-start --next --launch codex`
+- Claim/assign a task without launching a worker yet: `__SCRIPTS_DIR__/task-start --issue <n>`
 - Mark PR opened: `__SCRIPTS_DIR__/task-finish --issue <n> --pr <url>`
 - Mark blocked: `__SCRIPTS_DIR__/task-finish --issue <n> --blocked "<reason>"`
 - Mark merged: `__SCRIPTS_DIR__/task-finish --issue <n> --merged --pr <url>`

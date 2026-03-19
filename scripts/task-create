@@ -121,6 +121,7 @@ cat >"$task_dir/task.json" <<EOF
   "base_remote_ref": $(printf '%s' "$base_remote_ref" | jq -Rs .),
   "base_sha": $(printf '%s' "$base_sha" | jq -Rs .),
   "worktree": $(printf '%s' "$worktree" | jq -Rs .),
+  "assignment": null,
   "status": "created",
   "review_rework_attempts": 0,
   "review_rework_limit": 3,
@@ -209,4 +210,4 @@ if [[ "$json_mode" -eq 1 ]]; then
   exit 0
 fi
 
-harness_print_task_summary "$task_id" "$title" "$branch" "$worktree" "$codex_session" "$openclaw_session"
+harness_print_task_summary "$task_id" "$title" "$branch" "$worktree" "$codex_session" "$openclaw_session" "" ""

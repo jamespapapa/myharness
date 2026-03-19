@@ -43,6 +43,7 @@ if [[ -z "$label_filter" ]]; then
 fi
 repo=$(harness_repo_slug)
 claimed=$(harness_claimed_issue_numbers_json "$repo")
+active_tasks=$(harness_issue_numbers_with_task_statuses_json "assigned" "in_progress")
 
 issues=$(gh api "repos/$repo/issues?state=open&per_page=$limit&sort=created&direction=asc")
 
@@ -52,7 +53,8 @@ selected=$(printf '%s' "$issues" | jq \
   --arg done "$HARNESS_LABEL_DONE" \
   --arg blocked "$HARNESS_LABEL_BLOCKED" \
   --arg label_filter "$label_filter" \
-  --argjson claimed "$claimed" '
+  --argjson claimed "$claimed" \
+  --argjson active_tasks "$active_tasks" '
     map(
       select(.pull_request | not)
       | .number as $issue_number
@@ -62,6 +64,7 @@ selected=$(printf '%s' "$issues" | jq \
       | select(([.labels[].name] | index($done)) | not)
       | select(([.labels[].name] | index($blocked)) | not)
       | select(($claimed | index($issue_number)) | not)
+      | select(($active_tasks | index($issue_number)) | not)
       | select(
           if ($label_filter | length) == 0
           then true
