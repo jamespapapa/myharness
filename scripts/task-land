@@ -167,9 +167,7 @@ fi
 
 if [[ "$current_base_sha" != "$reviewed_base_sha" || "$current_base_sha" != "$prepared_base_sha" || "$current_head_sha" != "$reviewed_head_sha" || "$current_head_sha" != "$prepared_head_sha" ]]; then
   harness_update_task_status "$task_id" "pr_open" "review/prepare artifacts stale; PR head or base changed" "$pr_url"
-  if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
-    harness_issue_comment "$repo_slug" "$issue_number" "Harness note: land deferred because review/prepare artifacts are stale for PR #$pr_number."
-  fi
+  harness_record_stage_summary "$task_id" "land" "deferred" "Land did not run because the current PR head and base no longer matched the reviewed and prepared artifacts." "$pr_url" "PR #$pr_number head or base changed after review or prepare."
   printf 'land deferred due to stale artifacts: %s\n' "$task_id"
   exit 0
 fi

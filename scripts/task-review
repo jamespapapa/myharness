@@ -77,6 +77,7 @@ task_json=$(harness_task_json "$task_id")
 pr_url=$(printf '%s' "$task_json" | jq -r '.pr_url // ""')
 worktree=$(printf '%s' "$task_json" | jq -r '.worktree')
 title=$(printf '%s' "$task_json" | jq -r '.title')
+issue_body=$(printf '%s' "$task_json" | jq -r '.issue_body // ""')
 issue_number=$(printf '%s' "$task_json" | jq -r '.issue_number // empty')
 repo_slug=$(printf '%s' "$task_json" | jq -r '.repo_slug // ""')
 rework_attempts=$(harness_task_review_rework_attempts "$task_id")
@@ -101,6 +102,8 @@ harness_ensure_artifact_dir "reviews" "$task_id"
 review_md="$artifact_dir/review.md"
 review_json="$artifact_dir/review.json"
 review_log="$artifact_dir/review-run.log"
+: >"$review_md"
+: >"$review_json"
 printf '%s\n' "$pr_json" >"$artifact_dir/pr.json"
 printf '%s\n' "$task_json" >"$artifact_dir/task.json"
 
@@ -129,6 +132,12 @@ cat >"$review_session/REVIEW_TASK.md" <<EOF
 - artifact_json: \`$review_json\`
 - diff_patch: \`$diff_patch\`
 
+## Original Issue Contract
+
+- title: $title
+
+$(if [[ -n "$issue_body" ]]; then printf '%s\n' "$issue_body"; else printf 'No additional issue body was provided.\n'; fi)
+
 ## Mission
 
 Review the current PR head against base commit \`$base_sha\` on \`$base_ref\` with a code review mindset.
@@ -141,11 +150,13 @@ Primary inputs for this review:
 
 Focus on:
 
+- whether the diff actually satisfies the original issue contract,
 - correctness regressions,
 - unsafe assumptions,
 - missing validation,
 - missing tests or proof,
 - merge risk.
+- For implementation tasks, docs-only or planning-only diffs are not enough unless the issue explicitly asked for docs-only work.
 
 Verdict guidance:
 
@@ -189,7 +200,7 @@ If the PR should not land, choose the narrowest valid verdict and explain why.
 EOF
 
 review_prompt=$(cat <<EOF
-Read AGENTS.md and REVIEW_TASK.md in the current directory. Review the PR head without modifying code, and write the required artifacts exactly where requested.
+Read AGENTS.md and REVIEW_TASK.md in the current directory. Review the PR head against the original issue contract without modifying code, and write the required artifacts exactly where requested.
 
 Constraints:
 
@@ -201,8 +212,9 @@ Constraints:
 EOF
 )
 
+codex_permission_flag=$(harness_codex_permission_flag)
 review_exit=0
-if (cd "$review_session" && harness_run_with_timeout "$HARNESS_REVIEW_TIMEOUT_SECONDS" codex exec -c model_reasoning_effort='medium' --disable child_agents_md --add-dir "$artifact_dir" --full-auto "$review_prompt") >"$review_log" 2>&1; then
+if (cd "$review_session" && harness_run_with_timeout "$HARNESS_REVIEW_TIMEOUT_SECONDS" codex exec -c model_reasoning_effort='medium' --disable child_agents_md --add-dir "$artifact_dir" "$codex_permission_flag" "$review_prompt") >"$review_log" 2>&1; then
   review_exit=0
 else
   review_exit=$?
@@ -238,9 +250,7 @@ current_head_sha=$(printf '%s' "$current_pr_json" | jq -r '.headRefOid')
 
 if [[ "$reviewed_base_sha" != "$base_sha" || "$reviewed_head_sha" != "$head_sha" || "$current_base_sha" != "$base_sha" || "$current_head_sha" != "$head_sha" ]]; then
   harness_update_task_status "$task_id" "pr_open" "review artifact stale; PR head or base moved during review" "$pr_url"
-  if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
-    harness_issue_comment "$repo_slug" "$issue_number" "Harness note: review artifact became stale because the PR head or base changed during review."
-  fi
+  harness_record_stage_summary "$task_id" "review" "stale" "Review did not advance because its artifact no longer matched the current PR head and base." "$pr_url" "PR #$pr_number head or base changed during review."
   printf 'review stale: %s\n' "$task_id"
   exit 0
 fi
@@ -249,10 +259,12 @@ case "$verdict" in
   approved)
     harness_set_task_review_state "$task_id" "approved"
     harness_update_task_status "$task_id" "reviewed" "$summary" "$pr_url"
-    harness_record_stage_summary "$task_id" "review" "approved" "Review approved PR #$pr_number at head $head_sha." "$pr_url"
-    if [[ -n "$issue_number" && -n "$repo_slug" ]] && harness_can_sync_github; then
-      harness_issue_comment "$repo_slug" "$issue_number" "Harness review approved for PR #$pr_number at head \`$head_sha\`."
+    if [[ -n "$summary" ]]; then
+      review_happened="Review approved PR #$pr_number at head $head_sha and cleared it for prepare: $summary"
+    else
+      review_happened="Review approved PR #$pr_number at head $head_sha and cleared it for prepare."
     fi
+    harness_record_stage_summary "$task_id" "review" "approved" "$review_happened" "$pr_url"
     printf 'review approved: %s\n' "$task_id"
     ;;
   rework)
@@ -273,7 +285,7 @@ case "$verdict" in
     fi
     harness_update_task_status "$task_id" "rework" "$rework_reason" "$pr_url"
     harness_set_task_review_state "$task_id" "rework" "$next_attempt"
-    harness_record_stage_summary "$task_id" "review" "rework" "Review requested automatic rework attempt $next_attempt of $rework_limit for PR #$pr_number at head $head_sha." "$pr_url"
+    harness_record_stage_summary "$task_id" "review" "rework" "Review requested automatic rework attempt $next_attempt of $rework_limit for PR #$pr_number at head $head_sha." "$pr_url" "$rework_reason"
     printf 'review rework: %s (%s/%s)\n' "$task_id" "$next_attempt" "$rework_limit"
     ;;
   rejected)

@@ -125,6 +125,31 @@ This avoids duplicate issue selection and keeps prioritization deterministic.
 5. assign it to an execution slot/channel,
 6. monitor until next state transition.
 
+### Assignment Record
+
+Every claimed task should carry an explicit assignment record in local state so ownership is auditable:
+
+- `assignment.slot`: which execution slot owns the task
+- `assignment.channel`: which execution channel owns the task
+- `assignment.assigned_by`: which dispatcher created the assignment
+- `assignment.assigned_at`: when the assignment was made
+
+The control tower writes that record when it claims the task.
+Execution channels should refuse to self-fetch and should only run tasks whose assignment matches their own slot/channel identity.
+
+### Script Mapping
+
+Current harness commands for this split:
+
+- control tower dispatch and higher-priority lane reconciliation:
+  `scripts/task-control-room-once --dispatch-only --assign-slot exec-1 --assign-channel project-dev-1`
+- execution channel consumes only assigned work:
+  `scripts/task-run-once --assigned-only --assign-slot exec-1 --assign-channel project-dev-1`
+- single-loop safe fallback:
+  `scripts/task-control-room-once`
+
+That fallback keeps the seed repo runnable while preserving the central-dispatch contract for future multi-channel rollout.
+
 ## Runner Model
 
 Do not run cron against a developer's working checkout.

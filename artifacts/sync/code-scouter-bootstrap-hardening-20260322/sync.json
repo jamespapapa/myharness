@@ -1,0 +1,33 @@
+{
+  "sync_id": "code-scouter-bootstrap-hardening-20260322",
+  "source_harness_core_revision": "code-scouter-seed@48f74f6+stale-worktree-fix",
+  "target_repo": "jamespapapa/myharness",
+  "shared_paths": [
+    "ops/AUTONOMOUS_SWARM.md",
+    "scripts/check-control-room-notifications",
+    "scripts/check-docs-only-detection",
+    "scripts/check-harness",
+    "scripts/check-release-tracking",
+    "scripts/check-review-outcomes",
+    "scripts/check-stage-reporting",
+    "scripts/check-sync-owned-paths",
+    "scripts/check-sync-request",
+    "scripts/check-task-control-room-once",
+    "scripts/check-task-create",
+    "scripts/check-task-run-once",
+    "scripts/harness-lib.sh",
+    "scripts/task-create",
+    "scripts/task-prepare",
+    "scripts/task-review",
+    "scripts/task-run-once",
+    "scripts/task-start"
+  ],
+  "overlay_conflicts": [],
+  "verification": [
+    "bash scripts/check-task-create",
+    "bash scripts/check-task-run-once",
+    "bash scripts/check-review-outcomes",
+    "bash scripts/check-sync-owned-paths --self-test && bash scripts/check-docs-only-detection",
+    "bash scripts/check-harness --skip-doc-coverage"
+  ]
+}

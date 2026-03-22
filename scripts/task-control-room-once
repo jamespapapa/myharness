@@ -7,6 +7,9 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$SCRIPT_DIR/harness-lib.sh"
 
 log_file=""
+dispatch_only=0
+assignment_slot=""
+assignment_channel=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -14,8 +17,20 @@ while [[ $# -gt 0 ]]; do
       log_file="${2:-}"
       shift 2
       ;;
+    --dispatch-only)
+      dispatch_only=1
+      shift
+      ;;
+    --assign-slot)
+      assignment_slot="${2:-}"
+      shift 2
+      ;;
+    --assign-channel)
+      assignment_channel="${2:-}"
+      shift 2
+      ;;
     -h|--help)
-      echo "usage: scripts/task-control-room-once [--log-file <path>]"
+      echo "usage: scripts/task-control-room-once [--log-file <path>] [--dispatch-only] [--assign-slot <slot>] [--assign-channel <channel>]"
       exit 0
       ;;
     *)
@@ -27,6 +42,8 @@ done
 harness_load_project_env
 harness_prepare_state
 [[ -n "$log_file" ]] || log_file="$HARNESS_LOG_DIR/task-control-room-once.jsonl"
+assignment_slot=$(harness_resolve_assignment_slot "$assignment_slot")
+assignment_channel=$(harness_resolve_assignment_channel "$assignment_channel")
 
 emit_log() {
   jq -nc \
@@ -64,6 +81,7 @@ run_lane_once() {
   local command_path="$3"
   local next_task=""
   local output exit_code
+  local -a command_args
 
   lane_task_id=""
   lane_output=""
@@ -77,10 +95,26 @@ run_lane_once() {
     fi
   fi
 
-  if output=$("$command_path" 2>&1); then
-    exit_code=0
+  command_args=()
+  if [[ "$lane" == "executor" ]]; then
+    if [[ "$dispatch_only" -eq 1 ]]; then
+      command_args+=(--dispatch-only)
+    fi
+    command_args+=(--assign-slot "$assignment_slot" --assign-channel "$assignment_channel" --assigned-by "task-control-room-once")
+  fi
+
+  if [[ "${#command_args[@]}" -gt 0 ]]; then
+    if output=$("$command_path" "${command_args[@]}" 2>&1); then
+      exit_code=0
+    else
+      exit_code=$?
+    fi
   else
-    exit_code=$?
+    if output=$("$command_path" 2>&1); then
+      exit_code=0
+    else
+      exit_code=$?
+    fi
   fi
 
   lane_output="$output"

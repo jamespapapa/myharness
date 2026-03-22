@@ -19,6 +19,30 @@ set -euo pipefail
 
 state_dir="${HARNESS_MOCK_GH_STATE_DIR:?}"
 repo_slug="${HARNESS_MOCK_GH_REPO:-example/test-harness}"
+comments_log="${HARNESS_MOCK_GH_COMMENTS_LOG:?}"
+
+record_issue_comment() {
+  local issue_number="$1"
+  shift
+  local body=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --body)
+        body="${2:-}"
+        shift 2
+        ;;
+      -R|--repo)
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  jq -nc --argjson issue_number "$issue_number" --arg body "$body" '{issue_number:$issue_number,body:$body}' >>"$comments_log"
+}
 
 cmd="${1:-}"
 shift || true
@@ -58,7 +82,14 @@ case "$cmd" in
         cat "$state_dir/issue-$issue_number.json"
         exit 0
         ;;
-      edit|comment)
+      edit)
+        exit 0
+        ;;
+      comment)
+        shift
+        issue_number="${1:?}"
+        shift
+        record_issue_comment "$issue_number" "$@"
         exit 0
         ;;
     esac
@@ -70,42 +101,58 @@ case "$cmd" in
         ;;
     esac
     ;;
+  pr)
+    case "${1:-}" in
+      create)
+        shift
+        head_branch=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --head)
+              head_branch="${2:-}"
+              shift 2
+              ;;
+            *)
+              shift
+              ;;
+          esac
+        done
+        if [[ "$head_branch" =~ ([0-9]+)$ ]]; then
+          pr_number="${BASH_REMATCH[1]}"
+        else
+          pr_number="9999"
+        fi
+        pr_url="https://example.test/pr/$pr_number"
+        printf '%s\n' "$pr_url"
+        exit 0
+        ;;
+      list)
+        shift
+        head_branch=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --head)
+              head_branch="${2:-}"
+              shift 2
+              ;;
+            *)
+              shift
+              ;;
+          esac
+        done
+        if [[ "$head_branch" =~ ([0-9]+)$ ]]; then
+          printf 'https://example.test/pr/%s\n' "${BASH_REMATCH[1]}"
+        fi
+        exit 0
+        ;;
+    esac
+    ;;
 esac
 
 printf 'unsupported gh invocation: %s %s\n' "$cmd" "$*" >&2
 exit 1
 EOF
   chmod +x "$bin_dir/gh"
-
-  cat >"$bin_dir/curl" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-payload=""
-url=""
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -d|--data|--data-raw)
-      payload="${2:-}"
-      shift 2
-      ;;
-    -H|-X|-u|--user)
-      shift 2
-      ;;
-    -fsS)
-      shift
-      ;;
-    *)
-      url="$1"
-      shift
-      ;;
-  esac
-done
-
-jq -nc --arg payload "$payload" --arg url "$url" '{payload:$payload,url:$url}' >>"${HARNESS_MOCK_CURL_LOG:?}"
-EOF
-  chmod +x "$bin_dir/curl"
 
   cat >"$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
@@ -120,7 +167,7 @@ while [[ $# -gt 0 ]]; do
     --disable)
       shift 2
       ;;
-    --full-auto)
+    --full-auto|--dangerously-bypass-approvals-and-sandbox)
       shift
       ;;
     *)
@@ -130,7 +177,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 repo_root=$(git rev-parse --show-toplevel)
-"$repo_root/scripts/task-finish" --issue "${HARNESS_MOCK_CODEX_ISSUE:-9001}" --pr "${HARNESS_MOCK_CODEX_PR_URL:-https://example.test/pr/9001}" >/dev/null
+printf '\nSynthetic executor change for stage reporting.\n' >>"$repo_root/README.md"
 EOF
   chmod +x "$bin_dir/codex"
 }
@@ -141,12 +188,14 @@ setup_fixture() {
   REMOTE_DIR="$FIXTURE_DIR/remote.git"
   MOCK_STATE_DIR="$FIXTURE_DIR/mock-gh"
   BIN_DIR="$FIXTURE_DIR/bin"
-  CURL_LOG="$FIXTURE_DIR/curl.jsonl"
+  COMMENTS_LOG="$FIXTURE_DIR/comments.jsonl"
 
   mkdir -p "$FIXTURE_DIR" "$MOCK_STATE_DIR"
+  : >"$COMMENTS_LOG"
   write_mock_binaries "$BIN_DIR"
 
   rsync -a \
+    --exclude 'node_modules' \
     --exclude '.git' \
     --exclude '.harness/state' \
     --exclude '.harness/tasks' \
@@ -171,18 +220,27 @@ setup_fixture() {
 HARNESS_REPO_SLUG="example/test-harness"
 HARNESS_AUTONOMOUS_LABEL="Ready"
 HARNESS_EXECUTOR_TIMEOUT_SECONDS="2"
-HARNESS_JIRA_BASE_URL="https://jira.example.test"
-HARNESS_JIRA_USER_EMAIL="harness@example.test"
-HARNESS_JIRA_API_TOKEN="secret-token"
 EOF
 
   cat >"$MOCK_STATE_DIR/issue-9001.json" <<'EOF'
 {
   "number": 9001,
   "title": "Synthetic stage reporting issue",
-  "body": "## Problem\n- Need durable stage reporting.\n\nJira: OPS-9001\n",
+  "body": "## Problem\n- Need durable stage reporting.\n",
   "url": "https://example.test/issues/9001",
   "labels": [{"name":"Ready"}],
+  "assignees": [],
+  "state": "OPEN"
+}
+EOF
+
+  cat >"$MOCK_STATE_DIR/issue-9002.json" <<'EOF'
+{
+  "number": 9002,
+  "title": "Synthetic direct stage summary issue",
+  "body": "## Problem\n- Need direct stage comment coverage.\n",
+  "url": "https://example.test/issues/9002",
+  "labels": [],
   "assignees": [],
   "state": "OPEN"
 }
@@ -198,9 +256,7 @@ task_env() {
     PATH="$BIN_DIR:$PATH" \
     HARNESS_MOCK_GH_STATE_DIR="$MOCK_STATE_DIR" \
     HARNESS_MOCK_GH_REPO="example/test-harness" \
-    HARNESS_MOCK_CURL_LOG="$CURL_LOG" \
-    HARNESS_MOCK_CODEX_ISSUE="9001" \
-    HARNESS_MOCK_CODEX_PR_URL="https://example.test/pr/9001" \
+    HARNESS_MOCK_GH_COMMENTS_LOG="$COMMENTS_LOG" \
     "$@"
 }
 
@@ -226,13 +282,36 @@ assert_contains() {
   fi
 }
 
+issue_comments() {
+  local issue_number="$1"
+  jq -sr --argjson issue_number "$issue_number" 'map(select(.issue_number == $issue_number) | .body) | join("\n---\n")' "$COMMENTS_LOG"
+}
+
+record_stage_summary() {
+  local task_id="$1"
+  local stage="$2"
+  local event="$3"
+  local happened="$4"
+  local pr_url="${5:-}"
+  local blocked_reason="${6:-}"
+  local next_action="${7:-}"
+
+  task_env REPO_DIR="$REPO_DIR" TASK_ID="$task_id" STAGE="$stage" EVENT="$event" HAPPENED="$happened" PR_URL="$pr_url" BLOCKED_REASON="$blocked_reason" NEXT_ACTION="$next_action" bash -c '
+    set -euo pipefail
+    cd "$REPO_DIR"
+    source ./scripts/harness-lib.sh
+    harness_prepare_state
+    harness_record_stage_summary "$TASK_ID" "$STAGE" "$EVENT" "$HAPPENED" "$PR_URL" "$BLOCKED_REASON" "$NEXT_ACTION"
+  '
+}
+
 setup_fixture
+
 output=$(task_env "$REPO_DIR/scripts/task-run-once")
-assert_eq "$output" "success: issue #9001 -> PR https://example.test/pr/9001" "task-run-once should reconcile the worker-finished task to pr_open"
+assert_eq "$output" "success: reconciled issue #9001 -> PR https://example.test/pr/9001" "task-run-once should reconcile the worker-finished task to pr_open"
 
 task_json="$REPO_DIR/.harness/tasks/issue-9001/task.json"
-jira_issue_key=$(jq -r '.jira_issue_key' "$task_json")
-assert_eq "$jira_issue_key" "OPS-9001" "task should carry the linked Jira issue key"
+assert_contains "$(cat "$task_json")" '"stage_summaries"' "task records should still persist stage summaries locally"
 
 stage_ids=$(jq -r '.stage_summaries | map(.stage_id) | join(",")' "$task_json")
 assert_eq "$stage_ids" "claim_started,executor_started,executor_reconciled_to_pr" "stage summaries should record the key executor transitions"
@@ -240,16 +319,47 @@ assert_eq "$stage_ids" "claim_started,executor_started,executor_reconciled_to_pr
 latest_stage=$(jq -r '.last_stage_summary.stage_id' "$task_json")
 assert_eq "$latest_stage" "executor_reconciled_to_pr" "latest stage summary should reflect the PR-open transition"
 
-comment_count=$(jq -s 'length' "$CURL_LOG")
-assert_eq "$comment_count" "3" "linked Jira task should receive stage comments for claim start, executor start, and PR reconcile"
+executor_comments=$(issue_comments 9001)
+assert_contains "$executor_comments" "Harness stage update: claim started." "GitHub issue comments should include the claim stage"
+assert_contains "$executor_comments" "Harness stage update: executor started." "GitHub issue comments should include the executor start stage"
+assert_contains "$executor_comments" "Harness stage update: executor reconciled to PR." "GitHub issue comments should include the PR reconcile stage"
+assert_contains "$executor_comments" "latest remote base" "executor PR handoff comment should mention the remote-base sync result"
+assert_contains "$executor_comments" "https://example.test/pr/9001" "executor PR handoff comment should include the PR URL"
 
-comment_bodies=$(jq -r '.payload | fromjson | .body' "$CURL_LOG")
-assert_contains "$comment_bodies" 'stage: `claim started`' "Jira comments should include the claim stage"
-assert_contains "$comment_bodies" 'stage: `executor started`' "Jira comments should include the executor start stage"
-assert_contains "$comment_bodies" 'stage: `executor reconciled to PR`' "Jira comments should include the PR reconcile stage"
-assert_contains "$comment_bodies" 'https://example.test/pr/9001' "Jira PR stage comment should include the PR URL"
+mkdir -p "$REPO_DIR/.harness/tasks/issue-9002"
+cat >"$REPO_DIR/.harness/tasks/issue-9002/task.json" <<EOF
+{
+  "task_id": "issue-9002",
+  "issue_number": 9002,
+  "title": "Synthetic direct stage summary issue",
+  "issue_body": "",
+  "issue_url": "https://example.test/issues/9002",
+  "repo_slug": "example/test-harness",
+  "branch": "fix/issue-9002",
+  "base_branch": "dev",
+  "base_remote_ref": "origin/dev",
+  "base_sha": "dev-base",
+  "worktree": "$REPO_DIR",
+  "status": "prepared",
+  "created_at": "2026-03-15T00:00:00Z",
+  "updated_at": "2026-03-15T00:00:00Z",
+  "stage_summaries": []
+}
+EOF
 
-comment_urls=$(jq -r '.url' "$CURL_LOG" | sort -u)
-assert_eq "$comment_urls" "https://jira.example.test/rest/api/2/issue/OPS-9001/comment" "Jira comments should target the linked issue"
+record_stage_summary "issue-9002" "prepare" "passed" "Prepare passed for PR #44 at head abc123 and all configured verification gates succeeded." "https://example.test/pr/44"
+record_stage_summary "issue-9002" "prepare" "failed" "Prepare failed while running verification gates for PR #44." "https://example.test/pr/44" "prepare failed: ./scripts/check-doc-coverage"
+record_stage_summary "issue-9002" "land" "blocked" "Land could not merge because the PR checks failed." "https://example.test/pr/44" "remote status checks failed"
+record_stage_summary "issue-9002" "land" "deferred" "Land did not run because the current PR head and base no longer matched the reviewed and prepared artifacts." "https://example.test/pr/44" "PR #44 head or base changed after review or prepare."
+
+stage_comments=$(issue_comments 9002)
+assert_contains "$stage_comments" "Harness stage update: prepare passed." "prepare passed should leave a GitHub issue comment"
+assert_contains "$stage_comments" "all configured verification gates succeeded" "prepare passed comment should include the concrete result"
+assert_contains "$stage_comments" "Harness stage update: prepare failed." "prepare failed should leave a GitHub issue comment"
+assert_contains "$stage_comments" "prepare failed: ./scripts/check-doc-coverage" "prepare failed comment should include the failing gate"
+assert_contains "$stage_comments" "Harness stage update: land blocked." "land blocked should leave a GitHub issue comment"
+assert_contains "$stage_comments" "remote status checks failed" "land blocked comment should include the blocker reason"
+assert_contains "$stage_comments" "Harness stage update: land deferred." "land deferred should leave a GitHub issue comment"
+assert_contains "$stage_comments" "PR #44 head or base changed after review or prepare." "land deferred comment should explain the stale-artifact reason"
 
 printf 'check-stage-reporting passed\n'

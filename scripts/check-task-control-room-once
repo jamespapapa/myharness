@@ -16,6 +16,7 @@ setup_fixture() {
 
   mkdir -p "$FIXTURE_DIR"
   rsync -a \
+    --exclude 'node_modules' \
     --exclude '.git' \
     --exclude '.harness/state' \
     --exclude '.harness/tasks' \
@@ -51,6 +52,24 @@ EOF
   chmod +x "$REPO_DIR/scripts/$name"
 }
 
+write_arg_stub() {
+  local name="$1"
+  local output="$2"
+  local exit_code="$3"
+  local quoted_output
+
+  quoted_output=$(printf '%q' "$output")
+
+  cat >"$REPO_DIR/scripts/$name" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$name \$*" >>'$REPO_DIR/CALLS.log'
+printf '%s\n' $quoted_output
+exit $exit_code
+EOF
+  chmod +x "$REPO_DIR/scripts/$name"
+}
+
 assert_eq() {
   local actual="$1"
   local expected="$2"
@@ -71,6 +90,27 @@ assert_contains() {
     printf 'assert_contains failed: %s\nneedle: %s\nhaystack: %s\n' "$message" "$needle" "$haystack" >&2
     exit 1
   fi
+}
+
+scenario_lane_entrypoints_report_idle() {
+  local output log_line
+
+  setup_fixture "lane-entrypoints-idle"
+
+  output=$("$REPO_DIR/scripts/task-land-once")
+  assert_eq "$output" "idle: land lane idle; no prepared task found" "task-land-once should report lane-specific idle output"
+  log_line=$(tail -n 1 "$REPO_DIR/.harness/logs/task-land-once.jsonl")
+  assert_contains "$log_line" '"status":"idle"' "task-land-once should log idle status"
+
+  output=$("$REPO_DIR/scripts/task-prepare-once")
+  assert_eq "$output" "idle: prepare lane idle; no reviewed task found" "task-prepare-once should report lane-specific idle output"
+  log_line=$(tail -n 1 "$REPO_DIR/.harness/logs/task-prepare-once.jsonl")
+  assert_contains "$log_line" '"status":"idle"' "task-prepare-once should log idle status"
+
+  output=$("$REPO_DIR/scripts/task-review-once")
+  assert_eq "$output" "idle: review lane idle; no pr_open task found" "task-review-once should report lane-specific idle output"
+  log_line=$(tail -n 1 "$REPO_DIR/.harness/logs/task-review-once.jsonl")
+  assert_contains "$log_line" '"status":"idle"' "task-review-once should log idle status"
 }
 
 scenario_stops_on_land_lane() {
@@ -116,10 +156,10 @@ scenario_falls_through_to_executor_waiting() {
   write_stub task-land-once "idle: land lane idle; no prepared task found" 0
   write_stub task-prepare-once "idle: prepare lane idle; no reviewed task found" 0
   write_stub task-review-once "idle: review lane idle; no pr_open task found" 0
-  write_stub task-run-once "waiting: ready queue empty; active work still running/reconciling; running=1 reconciling=0 total=1 limit=1" 0
+  write_stub task-run-once "waiting: ready queue empty; active work still assigned/running/reconciling; assigned=0 running=1 reconciling=0 total=1 limit=1" 0
 
   output=$("$REPO_DIR/scripts/task-control-room-once")
-  assert_eq "$output" "waiting: ready queue empty; active work still running/reconciling; running=1 reconciling=0 total=1 limit=1" "executor waiting output should surface at repo level"
+  assert_eq "$output" "waiting: ready queue empty; active work still assigned/running/reconciling; assigned=0 running=1 reconciling=0 total=1 limit=1" "executor waiting output should surface at repo level"
 
   calls=$(cat "$REPO_DIR/CALLS.log")
   assert_eq "$calls" $'task-land-once\ntask-prepare-once\ntask-review-once\ntask-run-once' "control room should check lanes in priority order before executor"
@@ -129,8 +169,26 @@ scenario_falls_through_to_executor_waiting() {
   assert_contains "$log_line" '"status":"waiting"' "executor waiting should stay distinguishable from idle"
 }
 
+scenario_dispatch_flags_flow_to_executor_lane() {
+  local output calls
+
+  setup_fixture "dispatch-flags"
+  write_stub task-land-once "idle: land lane idle; no prepared task found" 0
+  write_stub task-prepare-once "idle: prepare lane idle; no reviewed task found" 0
+  write_stub task-review-once "idle: review lane idle; no pr_open task found" 0
+  write_arg_stub task-run-once "success: dispatched issue #33 -> exec-a/slot-a" 0
+
+  output=$("$REPO_DIR/scripts/task-control-room-once" --dispatch-only --assign-slot slot-a --assign-channel exec-a)
+  assert_eq "$output" "success: dispatched issue #33 -> exec-a/slot-a" "control room should be able to dispatch without launching local execution"
+
+  calls=$(cat "$REPO_DIR/CALLS.log")
+  assert_eq "$calls" $'task-land-once\ntask-prepare-once\ntask-review-once\ntask-run-once --dispatch-only --assign-slot slot-a --assign-channel exec-a --assigned-by task-control-room-once' "control room should pass dispatch assignment provenance through to the executor lane"
+}
+
+scenario_lane_entrypoints_report_idle
 scenario_stops_on_land_lane
 scenario_stops_on_review_before_executor
 scenario_falls_through_to_executor_waiting
+scenario_dispatch_flags_flow_to_executor_lane
 
 printf 'check-task-control-room-once passed\n'
