@@ -145,7 +145,7 @@ while [[ $# -gt 0 ]]; do
     --disable)
       shift 2
       ;;
-    --full-auto)
+    --full-auto|--dangerously-bypass-approvals-and-sandbox)
       shift
       ;;
     *)
@@ -166,12 +166,14 @@ case "${HARNESS_MOCK_CODEX_MODE:-touch-readme}" in
   advance-base)
     printf '\nACP reconcile proof from mock codex.\n' >>README.md
     repo_dir="${HARNESS_MOCK_MAIN_REPO_DIR:?}"
-    git -C "$repo_dir" checkout -q dev
+    integration_branch="${HARNESS_MOCK_INTEGRATION_BRANCH:-dev}"
+    release_branch="${HARNESS_MOCK_RELEASE_BRANCH:-main}"
+    git -C "$repo_dir" checkout -q "$integration_branch"
     printf '\nBase branch advanced during executor run.\n' >>"$repo_dir/README.md"
     git -C "$repo_dir" add README.md
-    git -C "$repo_dir" commit -qm "test: advance dev during executor run"
-    git -C "$repo_dir" push origin dev >/dev/null 2>&1
-    git -C "$repo_dir" checkout -q main
+    git -C "$repo_dir" commit -qm "test: advance $integration_branch during executor run"
+    git -C "$repo_dir" push origin "$integration_branch" >/dev/null 2>&1
+    git -C "$repo_dir" checkout -q "$release_branch"
     ;;
   sleep-touch-readme)
     sleep 1
@@ -204,6 +206,7 @@ setup_fixture() {
   write_mock_binaries "$BIN_DIR"
 
   rsync -a \
+    --exclude 'node_modules' \
     --exclude '.git' \
     --exclude '.harness/state' \
     --exclude '.harness/tasks' \
@@ -226,6 +229,8 @@ setup_fixture() {
 
   cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
 HARNESS_AUTONOMOUS_LABEL="Ready"
+HARNESS_INTEGRATION_BRANCH="dev"
+HARNESS_RELEASE_BRANCH="main"
 HARNESS_EXECUTOR_TIMEOUT_SECONDS="30"
 HARNESS_EXECUTOR_ACTIVE_LIMIT="1"
 EOF
@@ -267,6 +272,8 @@ task_env() {
     HARNESS_MOCK_GH_REPO="example/test-harness" \
     HARNESS_MOCK_CODEX_PROMPT_LOG="$PROMPT_LOG" \
     HARNESS_MOCK_MAIN_REPO_DIR="$REPO_DIR" \
+    HARNESS_MOCK_INTEGRATION_BRANCH="dev" \
+    HARNESS_MOCK_RELEASE_BRANCH="main" \
     "$@"
 }
 

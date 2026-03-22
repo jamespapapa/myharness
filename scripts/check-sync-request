@@ -26,6 +26,7 @@ setup_fixture() {
 
   mkdir -p "$BIN_DIR" "$MOCK_STATE_DIR"
   rsync -a \
+    --exclude 'node_modules' \
     --exclude '.git' \
     --exclude '.harness/state' \
     --exclude '.harness/tasks' \

@@ -167,7 +167,7 @@ while [[ $# -gt 0 ]]; do
     --disable)
       shift 2
       ;;
-    --full-auto)
+    --full-auto|--dangerously-bypass-approvals-and-sandbox)
       shift
       ;;
     *)
@@ -195,6 +195,7 @@ setup_fixture() {
   write_mock_binaries "$BIN_DIR"
 
   rsync -a \
+    --exclude 'node_modules' \
     --exclude '.git' \
     --exclude '.harness/state' \
     --exclude '.harness/tasks' \

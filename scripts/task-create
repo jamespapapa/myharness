@@ -96,6 +96,10 @@ finish_script="$repo_root/scripts/task-finish"
 
 mkdir -p "$HARNESS_WORKTREE_ROOT" "$task_dir"
 
+if [[ -e "$worktree" ]] && ! git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  rm -rf "$worktree"
+fi
+
 if [[ ! -e "$worktree" ]]; then
   if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
     git -C "$repo_root" worktree add "$worktree" "$branch" >/dev/null
@@ -103,6 +107,8 @@ if [[ ! -e "$worktree" ]]; then
     git -C "$repo_root" worktree add -b "$branch" "$worktree" "$base_remote_ref" >/dev/null
   fi
 fi
+
+harness_bootstrap_worktree_dependencies "$worktree"
 
 mkdir -p "$codex_session" "$openclaw_session"
 cp "$repo_root/.harness/profiles/codex/AGENTS.md" "$codex_session/AGENTS.md"
@@ -124,7 +130,7 @@ cat >"$task_dir/task.json" <<EOF
   "assignment": null,
   "status": "created",
   "review_rework_attempts": 0,
-  "review_rework_limit": 3,
+  "review_rework_limit": ${HARNESS_REVIEW_REWORK_LIMIT},
   "last_review_verdict": "",
   "created_at": "$(harness_now_utc)",
   "stage_summaries": []
@@ -170,6 +176,8 @@ $(if [[ -n "$issue_number" ]]; then printf -- '- issue: `%s#%s`\n- issue url: %s
 - Work only on this one task.
 - Keep edits inside the paired worktree at \`../..\`.
 - Prefer minimal changes that can land as a focused PR.
+- Unless the issue explicitly asks for docs-only or planning-only work, docs-only/planning-only edits are not sufficient.
+- Satisfy the issue's Desired Outcome and Done Conditions in code/tests before handing the task off.
 
 ## Context
 

@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=./harness-lib.sh
+source "$SCRIPT_DIR/harness-lib.sh"
+
+assert_true() {
+  local condition="$1"
+  local message="$2"
+
+  if [[ "$condition" != "true" ]]; then
+    printf 'assert_true failed: %s\n' "$message" >&2
+    exit 1
+  fi
+}
+
+assert_false() {
+  local condition="$1"
+  local message="$2"
+
+  if [[ "$condition" != "false" ]]; then
+    printf 'assert_false failed: %s\n' "$message" >&2
+    exit 1
+  fi
+}
+
+docs_only_json=$(cat <<'JSON'
+{
+  "files": [
+    { "path": ".agent/active-plan.md" },
+    { "path": ".omx/plans/2026-03-21-phase-3b1-snapshot-manifest-metadata.md" }
+  ]
+}
+JSON
+)
+
+code_json=$(cat <<'JSON'
+{
+  "files": [
+    { "path": "packages/shared/src/types.ts" },
+    { "path": ".omx/plans/2026-03-21-phase-3b1-snapshot-manifest-metadata.md" }
+  ]
+}
+JSON
+)
+
+result="false"
+if harness_issue_files_docs_only_from_pr_json "$docs_only_json"; then
+  result="true"
+fi
+assert_true "$result" "docs-only PRs should short-circuit prepare command gates"
+
+result="false"
+if harness_issue_files_docs_only_from_pr_json "$code_json"; then
+  result="true"
+fi
+assert_false "$result" "code-touching PRs must not be classified as docs-only"
+
+printf 'check-docs-only-detection passed\n'

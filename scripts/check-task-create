@@ -76,6 +76,7 @@ setup_fixture() {
   write_mock_gh "$BIN_DIR"
 
   rsync -a \
+    --exclude 'node_modules' \
     --exclude '.git' \
     --exclude '.harness/state' \
     --exclude '.harness/tasks' \
@@ -83,6 +84,13 @@ setup_fixture() {
     --exclude '.harness-manager' \
     --exclude '.harness-session' \
     "$SOURCE_ROOT/" "$REPO_DIR/"
+
+  cat >"$REPO_DIR/package.json" <<'EOF'
+{
+  "name": "harness-fixture",
+  "private": true
+}
+EOF
 
   git init --bare "$REMOTE_DIR" >/dev/null
   git -C "$REPO_DIR" init -q -b main
@@ -96,8 +104,17 @@ setup_fixture() {
 
   cat >>"$REPO_DIR/.harness/project.env" <<EOF
 HARNESS_REPO_SLUG="example/test-harness"
+HARNESS_INTEGRATION_BRANCH="dev"
+HARNESS_RELEASE_BRANCH="main"
 HARNESS_WORKTREE_ROOT="$REPO_DIR/.tmp-worktrees"
 EOF
+
+  mkdir -p "$REPO_DIR/node_modules/.bin"
+  cat >"$REPO_DIR/node_modules/.bin/tsc" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$REPO_DIR/node_modules/.bin/tsc"
 }
 
 setup_fixture
@@ -111,13 +128,19 @@ branch=$(jq -r '.branch' "$task_file")
 worktree=$(jq -r '.worktree' "$task_file")
 codex_agents="$worktree/.harness-session/codex/AGENTS.md"
 codex_task="$worktree/.harness-session/codex/TASK.md"
+worktree_node_modules="$worktree/node_modules"
 
 assert_eq "$base_branch" "dev" "task-create should default issue work to the integration branch"
 assert_eq "$base_remote_ref" "origin/dev" "task-create should record origin/dev as the remote base ref"
 assert_eq "$branch" "fix/issue-42" "issue tasks should keep the issue branch naming convention"
 [[ -d "$worktree" ]] || { printf 'expected worktree to exist: %s\n' "$worktree" >&2; exit 1; }
+git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { printf 'expected task-create to recreate stale non-git worktree directories\n' >&2; exit 1; }
+[[ -L "$worktree_node_modules" ]] || { printf 'expected task-create to bootstrap worktree node_modules symlink\n' >&2; exit 1; }
+assert_eq "$(cd "$worktree_node_modules" && pwd -P)" "$(cd "$REPO_DIR/node_modules" && pwd -P)" "task-create should reuse root node_modules for the worktree"
 grep -Fq '## Required Base Sync Before Handoff' "$codex_agents" || { printf 'expected codex AGENTS to highlight base sync handoff rules\n' >&2; exit 1; }
 grep -Fq 'fetch `origin/dev` and confirm your branch contains that exact remote base head' "$codex_task" || { printf 'expected generated TASK.md to require syncing the latest remote base before handoff\n' >&2; exit 1; }
+grep -Fq 'docs-only/planning-only edits are not sufficient' "$codex_task" || { printf 'expected generated TASK.md to reject docs-only handoffs for implementation tasks\n' >&2; exit 1; }
 grep -Fq 'base branch sync failed:' "$codex_task" || { printf 'expected generated TASK.md to require an explicit blocker when base sync cannot be completed\n' >&2; exit 1; }
 
 printf 'check-task-create passed\n'
+

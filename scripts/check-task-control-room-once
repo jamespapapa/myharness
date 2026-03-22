@@ -16,6 +16,7 @@ setup_fixture() {
 
   mkdir -p "$FIXTURE_DIR"
   rsync -a \
+    --exclude 'node_modules' \
     --exclude '.git' \
     --exclude '.harness/state' \
     --exclude '.harness/tasks' \
@@ -91,6 +92,27 @@ assert_contains() {
   fi
 }
 
+scenario_lane_entrypoints_report_idle() {
+  local output log_line
+
+  setup_fixture "lane-entrypoints-idle"
+
+  output=$("$REPO_DIR/scripts/task-land-once")
+  assert_eq "$output" "idle: land lane idle; no prepared task found" "task-land-once should report lane-specific idle output"
+  log_line=$(tail -n 1 "$REPO_DIR/.harness/logs/task-land-once.jsonl")
+  assert_contains "$log_line" '"status":"idle"' "task-land-once should log idle status"
+
+  output=$("$REPO_DIR/scripts/task-prepare-once")
+  assert_eq "$output" "idle: prepare lane idle; no reviewed task found" "task-prepare-once should report lane-specific idle output"
+  log_line=$(tail -n 1 "$REPO_DIR/.harness/logs/task-prepare-once.jsonl")
+  assert_contains "$log_line" '"status":"idle"' "task-prepare-once should log idle status"
+
+  output=$("$REPO_DIR/scripts/task-review-once")
+  assert_eq "$output" "idle: review lane idle; no pr_open task found" "task-review-once should report lane-specific idle output"
+  log_line=$(tail -n 1 "$REPO_DIR/.harness/logs/task-review-once.jsonl")
+  assert_contains "$log_line" '"status":"idle"' "task-review-once should log idle status"
+}
+
 scenario_stops_on_land_lane() {
   local output calls log_line
 
@@ -163,6 +185,7 @@ scenario_dispatch_flags_flow_to_executor_lane() {
   assert_eq "$calls" $'task-land-once\ntask-prepare-once\ntask-review-once\ntask-run-once --dispatch-only --assign-slot slot-a --assign-channel exec-a --assigned-by task-control-room-once' "control room should pass dispatch assignment provenance through to the executor lane"
 }
 
+scenario_lane_entrypoints_report_idle
 scenario_stops_on_land_lane
 scenario_stops_on_review_before_executor
 scenario_falls_through_to_executor_waiting

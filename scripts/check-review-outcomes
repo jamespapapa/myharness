@@ -248,7 +248,7 @@ while [[ $# -gt 0 ]]; do
     --disable|--add-dir|-c)
       shift 2
       ;;
-    --full-auto)
+    --full-auto|--dangerously-bypass-approvals-and-sandbox)
       shift
       ;;
     *)
@@ -335,6 +335,7 @@ setup_fixture() {
   write_mock_binaries "$BIN_DIR"
 
   rsync -a \
+    --exclude 'node_modules' \
     --exclude '.git' \
     --exclude '.harness/state' \
     --exclude '.harness/tasks' \
@@ -546,21 +547,22 @@ scenario_rejected_is_terminal_without_blocking() {
 
 scenario_third_rework_blocks() {
   local issue_number="9003"
-  local task_json status attempts stage note labels output exit_code attempt comments
+  local task_json status attempts stage note labels output exit_code attempt comments rework_limit
 
   setup_fixture "rework-limit"
   create_pr_open_task "$issue_number" "Repeated rework escalation"
   task_json="$REPO_DIR/.harness/tasks/issue-$issue_number/task.json"
+  rework_limit=$(jq -r '.review_rework_limit' "$task_json")
 
-  for attempt in 1 2; do
+  for attempt in $(seq 1 $((rework_limit - 1))); do
     task_env HARNESS_MOCK_REVIEW_VERDICT="rework" HARNESS_MOCK_REVIEW_SUMMARY="still fixable attempt $attempt" \
       "$REPO_DIR/scripts/task-review" --task-id "issue-$issue_number" >/dev/null
     output=$(task_env HARNESS_MOCK_EXECUTOR_MODE="touch-readme" HARNESS_MOCK_EXECUTOR_APPEND="retry-$attempt" \
       "$REPO_DIR/scripts/task-run-once")
-    assert_contains "$output" "success: reconciled issue #9003 -> PR https://example.test/pr/9003" "first two rework findings should still retry automatically"
+    assert_contains "$output" "success: reconciled issue #9003 -> PR https://example.test/pr/9003" "pre-cap rework findings should still retry automatically"
   done
 
-  if output=$(task_env HARNESS_MOCK_REVIEW_VERDICT="rework" HARNESS_MOCK_REVIEW_SUMMARY="still fixable attempt 3" \
+  if output=$(task_env HARNESS_MOCK_REVIEW_VERDICT="rework" HARNESS_MOCK_REVIEW_SUMMARY="still fixable final capped attempt" \
     "$REPO_DIR/scripts/task-review" --task-id "issue-$issue_number" 2>&1); then
     exit_code=0
   else
@@ -574,14 +576,14 @@ scenario_third_rework_blocks() {
   labels=$(jq -r '[.labels[].name] | join(",")' "$MOCK_STATE_DIR/issue-$issue_number.json")
   comments=$(issue_comments "$issue_number")
 
-  assert_eq "$exit_code" "2" "the third retryable review finding should escalate as blocked"
-  assert_eq "$status" "blocked" "automatic rework should stop after the third failed attempt"
-  assert_eq "$attempts" "3" "the task should persist the capped rework attempt count"
+  assert_eq "$exit_code" "2" "the capped retryable review finding should escalate as blocked"
+  assert_eq "$status" "blocked" "automatic rework should stop once the retry cap is reached"
+  assert_eq "$attempts" "$rework_limit" "the task should persist the capped rework attempt count"
   assert_eq "$stage" "review_blocked" "stage summary should record the escalation"
-  assert_contains "$note" "automatic review rework limit reached (3/3)" "blocked note should explain why the loop stopped"
+  assert_contains "$note" "automatic review rework limit reached ($rework_limit/$rework_limit)" "blocked note should explain why the loop stopped"
   assert_contains "$labels" "harness:blocked" "escalated rework should sync the blocked GitHub label"
   assert_contains "$comments" "Harness stage update: review blocked." "escalated review should leave an explicit GitHub issue comment"
-  assert_contains "$comments" "automatic review rework limit reached (3/3)" "review blocked comment should include the escalation reason"
+  assert_contains "$comments" "automatic review rework limit reached ($rework_limit/$rework_limit)" "review blocked comment should include the escalation reason"
 }
 
 scenario_retryable_rework_requeues_executor

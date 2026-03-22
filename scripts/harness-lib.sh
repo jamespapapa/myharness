@@ -31,6 +31,20 @@ harness_control_room_idle_line() {
   printf 'checked: no work (Ready queue empty)\n'
 }
 
+harness_codex_permission_flag() {
+  case "${HARNESS_CODEX_PERMISSION_MODE:-danger-full-access}" in
+    danger-full-access|yolo|full)
+      printf '%s\n' '--dangerously-bypass-approvals-and-sandbox'
+      ;;
+    full-auto|sandboxed)
+      printf '%s\n' '--full-auto'
+      ;;
+    *)
+      harness_die "unsupported HARNESS_CODEX_PERMISSION_MODE: ${HARNESS_CODEX_PERMISSION_MODE}"
+      ;;
+  esac
+}
+
 harness_compact_text() {
   printf '%s' "$1" \
     | tr '\r\n\t' '   ' \
@@ -160,6 +174,7 @@ harness_load_project_env() {
   : "${HARNESS_EXECUTION_SLOT_COUNT:=${manifest_slot_count:-1}}"
   : "${HARNESS_EXECUTOR_ACTIVE_LIMIT:=$HARNESS_EXECUTION_SLOT_COUNT}"
   : "${HARNESS_REVIEW_TIMEOUT_SECONDS:=180}"
+  : "${HARNESS_REVIEW_REWORK_LIMIT:=5}"
   : "${HARNESS_PREPARE_TIMEOUT_SECONDS:=300}"
   : "${HARNESS_LAND_TIMEOUT_SECONDS:=120}"
   : "${HARNESS_PREPARE_COMMANDS_FILE:=$root/.harness/prepare.commands}"
@@ -1323,6 +1338,26 @@ harness_task_pr_json() {
   harness_fetch_pr_json "$pr_url"
 }
 
+harness_bootstrap_worktree_dependencies() {
+  local worktree repo_root root_node_modules worktree_node_modules
+  worktree="$1"
+
+  [[ -d "$worktree" ]] || return 0
+  [[ -f "$worktree/package.json" ]] || return 0
+
+  repo_root=$(harness_repo_root)
+  root_node_modules="$repo_root/node_modules"
+  worktree_node_modules="$worktree/node_modules"
+
+  if [[ -e "$worktree_node_modules" ]]; then
+    return 0
+  fi
+
+  if [[ -d "$root_node_modules" ]]; then
+    ln -s "$root_node_modules" "$worktree_node_modules"
+  fi
+}
+
 harness_issue_files_docs_only_from_pr_json() {
   local pr_json
   pr_json="$1"
@@ -1332,12 +1367,14 @@ harness_issue_files_docs_only_from_pr_json() {
     and all(
       .[];
       (
-        test("^\\.harness/")
-        or test("^\\.harness-manager/")
-        or test("(^|/)AGENTS\\.md$")
-        or test("(^|/)CLAUDE\\.md$")
+        (
+          test("^\\.harness/")
+          or test("^\\.harness-manager/")
+          or test("(^|/)AGENTS\\.md$")
+          or test("(^|/)CLAUDE\\.md$")
+        )
+        | not
       )
-      | not
       and (
         test("(^|/)(README|CHANGELOG)\\.md$")
         or test("\\.md$")

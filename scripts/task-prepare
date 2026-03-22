@@ -106,6 +106,8 @@ harness_ensure_artifact_dir "prep" "$task_id"
 printf '%s\n' "$pr_json" >"$artifact_dir/pr.json"
 printf '%s\n' "$task_json" >"$artifact_dir/task.json"
 
+harness_bootstrap_worktree_dependencies "$worktree"
+
 docs_only=false
 if harness_issue_files_docs_only_from_pr_json "$pr_json"; then
   docs_only=true

@@ -318,6 +318,7 @@ setup_fixture() {
   write_mock_binaries "$BIN_DIR"
 
   rsync -a \
+    --exclude 'node_modules' \
     --exclude '.git' \
     --exclude '.harness/state' \
     --exclude '.harness/tasks' \
@@ -334,6 +335,8 @@ setup_fixture() {
 
   cat >>"$REPO_DIR/.harness/project.env" <<'EOF'
 HARNESS_REPO_SLUG="example/test-harness"
+HARNESS_INTEGRATION_BRANCH="dev"
+HARNESS_RELEASE_BRANCH="main"
 EOF
 
   write_issue_state 9001

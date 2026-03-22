@@ -103,7 +103,7 @@ sync_metadata_covers_path() {
 }
 
 run_check() {
-  local repo_root manifest_file resolved_base merge_base path sync_hint sync_file covered
+  local repo_root manifest_file resolved_base merge_base path sync_hint sync_file covered project_env sync_owned_mode
   local -a core_owned_paths=()
   local -a project_owned_paths=()
   local -a sync_metadata_paths=()
@@ -115,6 +115,14 @@ run_check() {
   repo_root="$WORKTREE_ROOT"
   manifest_file="$repo_root/$MANIFEST_REL"
   [[ -f "$manifest_file" ]] || die "missing ownership manifest: $manifest_file"
+
+  project_env="$repo_root/.harness/project.env"
+  if [[ -f "$project_env" ]]; then
+    # shellcheck source=/dev/null
+    source "$project_env"
+  fi
+  : "${HARNESS_SYNC_OWNED_PATHS_MODE:=enforce}"
+  sync_owned_mode="$HARNESS_SYNC_OWNED_PATHS_MODE"
 
   while IFS= read -r path; do
     core_owned_paths+=("$path")
@@ -180,6 +188,14 @@ run_check() {
       return 0
     fi
 
+    if [[ "$sync_owned_mode" == "warn" ]]; then
+      printf 'warning: sync metadata does not declare all changed sync-owned paths:\n' >&2
+      printf '  - %s\n' "${uncovered_paths[@]}" >&2
+      printf 'warning: update the shared_paths list in %s to match the sync-owned files changed on this branch.\n' "${valid_sync_files[0]}" >&2
+      printf 'check-sync-owned-paths passed (warning mode)\n'
+      return 0
+    fi
+
     printf 'sync metadata does not declare all changed sync-owned paths:\n' >&2
     printf '  - %s\n' "${uncovered_paths[@]}" >&2
     printf 'update the shared_paths list in %s to match the sync-owned files changed on this branch.\n' "${valid_sync_files[0]}" >&2
@@ -187,6 +203,14 @@ run_check() {
   fi
 
   sync_hint=$(jq -r '.sync_metadata_paths[0]' "$manifest_file")
+  if [[ "$sync_owned_mode" == "warn" ]]; then
+    printf 'warning: sync-owned paths changed without sync metadata:\n' >&2
+    printf '  - %s\n' "${violating_paths[@]}" >&2
+    printf 'warning: add %s with source_harness_core_revision, target_repo, shared_paths, overlay_conflicts, and verification before changing sync-owned files.\n' "$sync_hint" >&2
+    printf 'check-sync-owned-paths passed (warning mode)\n'
+    return 0
+  fi
+
   printf 'sync-owned paths changed without sync metadata:\n' >&2
   printf '  - %s\n' "${violating_paths[@]}" >&2
   printf 'add %s with source_harness_core_revision, target_repo, shared_paths, overlay_conflicts, and verification before changing sync-owned files.\n' "$sync_hint" >&2
@@ -221,6 +245,7 @@ setup_fixture_repo() {
 
   mkdir -p "$fixture_dir"
   rsync -a \
+    --exclude 'node_modules' \
     --exclude '.git' \
     --exclude '.harness/state' \
     --exclude '.harness/tasks' \
@@ -228,6 +253,12 @@ setup_fixture_repo() {
     --exclude '.harness-manager' \
     --exclude '.harness-session' \
     "$SOURCE_ROOT/" "$repo_dir/"
+
+  if [[ -f "$repo_dir/.harness/project.env" ]]; then
+    cat >>"$repo_dir/.harness/project.env" <<'EOF'
+HARNESS_SYNC_OWNED_PATHS_MODE="enforce"
+EOF
+  fi
 
   git -C "$repo_dir" init -q -b main
   git -C "$repo_dir" config user.name "Harness Test"

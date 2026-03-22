@@ -336,6 +336,19 @@ find_assigned_pending_task() {
   return 1
 }
 
+is_transient_worktree_path() {
+  local path="$1"
+  path="${path#./}"
+
+  case "$path" in
+    .harness-session|.harness-session/*|node_modules|node_modules/*|.agent/active-plan.md|.omx/plans|.omx/plans/*)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
 find_task_by_id() {
   local active_json="$1"
   local target_task_id="$2"
@@ -387,14 +400,37 @@ find_explicit_running_task() {
   return 1
 }
 
+prune_transient_worktree_state() {
+  local worktree="$1"
+  local repo_root root_node_modules worktree_node_modules target
+
+  repo_root=$(harness_repo_root)
+  root_node_modules="$repo_root/node_modules"
+  worktree_node_modules="$worktree/node_modules"
+
+  if [[ -L "$worktree_node_modules" ]]; then
+    target=$(readlink "$worktree_node_modules" 2>/dev/null || true)
+    if [[ "$target" == "$root_node_modules" ]]; then
+      rm -f "$worktree_node_modules"
+    fi
+  fi
+}
+
 collect_changed_files() {
   local worktree="$1"
+  local changed_path
 
   {
     git -C "$worktree" diff --name-only
     git -C "$worktree" diff --cached --name-only
     git -C "$worktree" ls-files -o --exclude-standard
-  } | sort -u | grep -v '^\.harness-session/' || true
+  } | sort -u | while IFS= read -r changed_path; do
+    [[ -n "$changed_path" ]] || continue
+    if is_transient_worktree_path "$changed_path"; then
+      continue
+    fi
+    printf '%s\n' "$changed_path"
+  done || true
 }
 
 reconcile_task() {
@@ -441,6 +477,7 @@ reconcile_task() {
         fi
         ;;
       assigned|in_progress|created|unknown)
+        prune_transient_worktree_state "$worktree"
         changed_files=()
         while IFS= read -r changed_file; do
           [[ -n "$changed_file" ]] || continue
@@ -605,15 +642,16 @@ If you cannot complete the task, record the blocker with task-finish before exit
 EOF
 )
 
+  codex_permission_flag=$(harness_codex_permission_flag)
   worker_exit=0
   if [[ "${#codex_env[@]}" -gt 0 ]]; then
-    if (cd "$worktree" && harness_run_with_timeout "$HARNESS_EXECUTOR_TIMEOUT_SECONDS" env "${codex_env[@]}" codex exec --disable child_agents_md --full-auto "$worker_prompt") >"$worker_log" 2>&1; then
+    if (cd "$worktree" && harness_run_with_timeout "$HARNESS_EXECUTOR_TIMEOUT_SECONDS" env "${codex_env[@]}" codex exec --disable child_agents_md "$codex_permission_flag" "$worker_prompt") >"$worker_log" 2>&1; then
       worker_exit=0
     else
       worker_exit=$?
     fi
   else
-    if (cd "$worktree" && harness_run_with_timeout "$HARNESS_EXECUTOR_TIMEOUT_SECONDS" codex exec --disable child_agents_md --full-auto "$worker_prompt") >"$worker_log" 2>&1; then
+    if (cd "$worktree" && harness_run_with_timeout "$HARNESS_EXECUTOR_TIMEOUT_SECONDS" codex exec --disable child_agents_md "$codex_permission_flag" "$worker_prompt") >"$worker_log" 2>&1; then
       worker_exit=0
     else
       worker_exit=$?
