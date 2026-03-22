@@ -1,5 +1,0 @@
-{
-  "models": [],
-  "notes": "Phase 1 skeleton does not vendor local GGUF models yet. Add pinned assets here for Phase 2 query expansion and reranking."
-}
-
