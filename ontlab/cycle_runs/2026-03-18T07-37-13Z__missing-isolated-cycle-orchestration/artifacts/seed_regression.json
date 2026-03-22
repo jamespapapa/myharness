@@ -1,7 +1,0 @@
-{
-  "seed_regression_pass": true,
-  "checks": {
-    "yaml_failure_summary": "pass",
-    "json_failure_planner": "pass"
-  }
-}

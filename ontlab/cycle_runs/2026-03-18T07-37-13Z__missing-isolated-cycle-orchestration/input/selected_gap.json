@@ -1,8 +1,0 @@
-{
-  "selected_gap": "missing isolated cycle orchestration",
-  "conflict_keys": [
-    "file:AGENTS.md",
-    "file:README.ko.md",
-    "pack:harness-orchestration"
-  ]
-}

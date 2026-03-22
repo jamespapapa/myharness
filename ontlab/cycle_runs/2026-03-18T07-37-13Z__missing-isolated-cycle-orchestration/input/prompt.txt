@@ -1,3 +1,0 @@
-Isolated ontlab cycle.
-Selected gap: missing isolated cycle orchestration
-Apply one smallest safe change, record every step in cycle_runs/<cycle_id>/trace/events.jsonl, and leave a decision in outputs/decision.json.

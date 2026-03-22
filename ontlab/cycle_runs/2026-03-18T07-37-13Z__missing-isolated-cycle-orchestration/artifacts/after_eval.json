@@ -1,8 +1,0 @@
-{
-  "target_metrics": {
-    "file_backed_cycle_state": 1,
-    "batch_orchestration": 1,
-    "project_agent_scaffold": 1,
-    "stop_conditions_defined": 1
-  }
-}
